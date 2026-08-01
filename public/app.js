@@ -52,10 +52,66 @@ function statusLabel(status) {
   return { online: '在线', offline: '离线', busy: '测试中', running: '运行中', queued: '排队中', completed: '已完成', failed: '失败', cancelled: '已取消', timeout: '超时' }[status] || status;
 }
 
+function percentText(value) {
+  return value === null || value === undefined || Number.isNaN(Number(value)) ? '--' : `${Number(value).toFixed(1)}%`;
+}
+
+function appendOutput(line) {
+  const output = $('#raw-output');
+  if (output.dataset.streaming !== '1') { output.textContent = ''; output.dataset.streaming = '1'; }
+  output.textContent += `${line}\n`;
+  output.scrollTop = output.scrollHeight;
+}
+
+function handleLiveMessage(message) {
+  const taskId = message.taskId;
+  if (!taskId) return;
+  const test = state.tests.find((item) => item.id === taskId);
+  if (test && !state.activeTestId) state.activeTestId = taskId;
+  if (message.type === 'task.stdout' || message.type === 'task.stderr') {
+    const line = String(message.payload?.line ?? '');
+    if (test) test.output.push({ stream: message.type === 'task.stderr' ? 'stderr' : 'stdout', line });
+    if (state.activeTestId === taskId) appendOutput(line);
+  } else if (message.type === 'task.metric') {
+    if (test) test.metrics.push(message.payload || {});
+    if (state.activeTestId === taskId && test) {
+      const metric = message.payload || {};
+      $('#current-rate').textContent = `${Number(metric.sendMbps || metric.recvMbps || 0).toFixed(1)} Mbps`;
+      drawChart(test.metrics);
+    }
+  } else if (message.type === 'task.done' || message.type === 'task.error') {
+    Promise.all([loadAgents(), loadTests()]).catch(() => {});
+  }
+}
+
+function connectLive() {
+  disconnectLive();
+  const protocol = location.protocol === 'https:' ? 'wss' : 'ws';
+  const socket = new WebSocket(`${protocol}://${location.host}/ws/ui`);
+  state.liveSocket = socket;
+  socket.addEventListener('message', (event) => {
+    try { handleLiveMessage(JSON.parse(event.data)); } catch { /* ignore malformed frames */ }
+  });
+  socket.addEventListener('close', () => {
+    if (state.liveSocket === socket) {
+      state.liveSocket = null;
+      if (state.user) setTimeout(connectLive, 3000);
+    }
+  });
+}
+
+function disconnectLive() {
+  if (!state.liveSocket) return;
+  const socket = state.liveSocket;
+  state.liveSocket = null;
+  socket.close();
+}
+
 function showLogin() {
   $('#login-view').hidden = false;
   $('#app-view').hidden = true;
   clearInterval(state.pollTimer);
+  disconnectLive();
 }
 
 async function showApp(user) {
@@ -66,7 +122,13 @@ async function showApp(user) {
   $('#account-role').textContent = `${user.username} · ${roleLabel(user.role)}`;
   $$('[data-admin-only]').forEach((node) => { node.hidden = user.role !== 'admin'; });
   setView('tests');
-  await Promise.all([loadAgents(), loadTests(), user.role === 'admin' ? loadUsers() : Promise.resolve()]);
+  try {
+    await Promise.all([loadAgents(), loadTests(), user.role === 'admin' ? loadUsers() : Promise.resolve()]);
+  } catch (error) {
+    console.error(error);
+    toast(`数据加载失败：${error.message}`);
+  }
+  connectLive();
   clearInterval(state.pollTimer);
   state.pollTimer = setInterval(async () => {
     if ($('#app-view').hidden) return;
@@ -109,10 +171,10 @@ function renderAgentSelect() {
 function updateSelectedAgent() {
   const agent = state.agents.find((item) => item.id === $('#test-agent').value);
   $('#metric-agent').textContent = agent?.name || '未选择';
-  $('#metric-cpu').textContent = agent ? `${agent.cpuPercent.toFixed(1)}%` : '--';
-  $('#metric-memory').textContent = agent ? `${agent.memoryPercent.toFixed(1)}%` : '--';
-  $('#metric-upload').textContent = agent ? `${agent.uploadPercent.toFixed(1)}%` : '--';
-  $('#metric-download').textContent = agent ? `${agent.downloadPercent.toFixed(1)}%` : '--';
+  $('#metric-cpu').textContent = agent ? percentText(agent.cpuPercent) : '--';
+  $('#metric-memory').textContent = agent ? percentText(agent.memoryPercent) : '--';
+  $('#metric-upload').textContent = agent ? percentText(agent.uploadPercent) : '--';
+  $('#metric-download').textContent = agent ? percentText(agent.downloadPercent) : '--';
   $('#start-test').disabled = !agent || agent.status !== 'online';
 }
 
@@ -133,7 +195,7 @@ function renderAgents() {
     status.textContent = statusLabel(agent.status);
     const platform = `${agent.os || 'linux'} / ${agent.arch || 'unknown'}${agent.version ? ` · ${agent.version}` : ''}`;
     const location = [agent.publicIp, agent.ipLocation].filter(Boolean).join(' · ') || '--';
-    const resources = `CPU ${agent.cpuPercent.toFixed(1)}% / MEM ${agent.memoryPercent.toFixed(1)}%`;
+    const resources = agent.cpuPercent === null || agent.cpuPercent === undefined ? '--' : `CPU ${percentText(agent.cpuPercent)} / MEM ${percentText(agent.memoryPercent)}`;
     const actions = document.createElement('div');
     actions.className = 'row-actions';
     if (state.user.role === 'admin') {
@@ -184,7 +246,10 @@ function renderTests() {
     state.activeTestId = active.id;
     $('#test-state').textContent = statusLabel(active.status);
     $('#cancel-test').disabled = active.status !== 'running';
-    $('#raw-output').textContent = active.output.map((line) => line.line).join('\n') || '等待 Agent 输出。';
+    const outputText = active.output.map((line) => line.line).join('\n');
+    $('#raw-output').textContent = outputText || '等待 Agent 输出。';
+    $('#raw-output').dataset.streaming = outputText ? '1' : '0';
+    $('#raw-output').scrollTop = $('#raw-output').scrollHeight;
     const lastMetric = active.metrics.at(-1);
     $('#current-rate').textContent = `${Number(lastMetric?.sendMbps || lastMetric?.recvMbps || 0).toFixed(1)} Mbps`;
     drawChart(active.metrics);
@@ -200,21 +265,56 @@ async function loadTests() {
 }
 
 function drawChart(metrics) {
+  const svgNS = 'http://www.w3.org/2000/svg';
   const grid = $('#chart-grid');
+  const axis = $('#chart-axis');
   clear(grid);
-  const width = 660;
-  const height = 200;
-  const left = 42;
-  const top = 18;
+  clear(axis);
+  const left = 52;
+  const top = 20;
+  const width = 610;
+  const height = 182;
+  const bottom = top + height;
   const max = Math.max(100, ...metrics.flatMap((item) => [Number(item.sendMbps || 0), Number(item.recvMbps || 0)]));
+  const maxSecond = Math.max(1, ...metrics.map((item) => Number(item.second || 0)));
+  const text = (x, y, content, anchor = 'middle', className = '') => {
+    const node = document.createElementNS(svgNS, 'text');
+    node.setAttribute('x', x);
+    node.setAttribute('y', y);
+    node.setAttribute('text-anchor', anchor);
+    if (className) node.setAttribute('class', className);
+    node.textContent = content;
+    axis.appendChild(node);
+  };
+  const segment = (x1, y1, x2, y2, className = '') => {
+    const line = document.createElementNS(svgNS, 'line');
+    line.setAttribute('x1', x1); line.setAttribute('y1', y1);
+    line.setAttribute('x2', x2); line.setAttribute('y2', y2);
+    if (className) line.setAttribute('class', className);
+    return line;
+  };
   for (let index = 0; index <= 4; index += 1) {
-    const line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
-    const y = top + index * height / 4;
-    line.setAttribute('x1', left); line.setAttribute('x2', left + width); line.setAttribute('y1', y); line.setAttribute('y2', y);
-    grid.appendChild(line);
+    const y = top + (index * height) / 4;
+    grid.appendChild(segment(left, y, left + width, y));
+    const value = max - (index * max) / 4;
+    text(left - 8, y + 4, value >= 100 ? String(Math.round(value)) : value.toFixed(1), 'end');
   }
+  text(6, top - 6, 'Mbps', 'start', 'axis-unit');
+  axis.appendChild(segment(left, bottom, left + width, bottom, 'axis-line'));
+  axis.appendChild(segment(left, top, left, bottom, 'axis-line'));
+  for (let index = 0; index <= 4; index += 1) {
+    const x = left + (index * width) / 4;
+    axis.appendChild(segment(x, bottom, x, bottom + 5, 'axis-line'));
+    text(x, bottom + 18, `${Math.round((maxSecond * index) / 4)}s`);
+  }
+  text(left + width, bottom + 34, '时间（秒）', 'end', 'axis-unit');
+  axis.appendChild(segment(left + width - 168, top - 9, left + width - 146, top - 9, 'legend-send'));
+  text(left + width - 140, top - 5, '发送', 'start');
+  axis.appendChild(segment(left + width - 88, top - 9, left + width - 66, top - 9, 'legend-recv'));
+  text(left + width - 60, top - 5, '接收', 'start');
   const points = (key) => metrics.map((metric, index) => {
-    const x = left + (index / Math.max(metrics.length - 1, 1)) * width;
+    const second = Number(metric.second || 0);
+    const x = second > 0 ? left + (second / maxSecond) * width : left + (index / Math.max(metrics.length - 1, 1)) * width;
     const y = top + height - (Number(metric[key] || 0) / max) * height;
     return `${x.toFixed(1)},${y.toFixed(1)}`;
   }).join(' ');
@@ -316,6 +416,7 @@ $('#test-form').addEventListener('submit', async (event) => {
     const result = await api('/api/tests', { method: 'POST', body: JSON.stringify(data) });
     state.activeTestId = result.test.id;
     $('#raw-output').textContent = '任务已下发，等待 Agent 输出。';
+    $('#raw-output').dataset.streaming = '0';
     await Promise.all([loadAgents(), loadTests()]);
   } catch (error) { toast(error.message); }
 });

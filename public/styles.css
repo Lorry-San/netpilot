@@ -86,6 +86,11 @@ legend { margin-bottom: 6px; color: var(--muted); }
 .chart-panel { min-height: 310px; }
 #speed-chart { width: 100%; height: auto; display: block; padding: 12px; }
 #chart-grid line { stroke: var(--border); stroke-width: 1; }
+#chart-axis text { fill: var(--muted); font-size: 11px; }
+#chart-axis .axis-unit { font-size: 10px; letter-spacing: .04em; }
+#chart-axis .axis-line { stroke: var(--muted); stroke-width: 1; }
+#chart-axis .legend-send { stroke: var(--accent); stroke-width: 3; }
+#chart-axis .legend-recv { stroke: light-dark(#2379bd, #70b5e8); stroke-width: 2; }
 #send-line { fill: none; stroke: var(--accent); stroke-width: 3; }
 #recv-line { fill: none; stroke: light-dark(#2379bd, #70b5e8); stroke-width: 2; }
 pre { min-height: 190px; max-height: 310px; margin: 0; padding: 15px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; color: #c9d5da; background: #0c1216; font: .8rem/1.55 "Cascadia Code", Consolas, monospace; }

@@ -5,7 +5,7 @@ NetPilot is a self-hosted web control plane for distributed `iperf3` tests. A No
 ## Features
 
 - TCP and UDP `iperf3` tests with target, port, duration, parallel streams, bandwidth and reverse (`-R`) options
-- Streaming raw output and speed/time metrics
+- Streaming raw output and speed/time metrics pushed live to the browser over `/ws/ui`
 - Linux agents for `x86-64` and `arm64`
 - CPU, memory and network-interface utilization probes
 - Agent naming, public connection IP and location fields
@@ -85,6 +85,8 @@ SQLite data is stored in the `netpilot-data` volume.
 4. Run either the generated Docker command or the generated one-line installer.
 
 The generated token is shown once. Only its SHA-256 digest is stored by the server.
+
+Install commands use the scheme and host of the admin's own HTTP request (including `X-Forwarded-Proto` behind a reverse proxy). `PUBLIC_BASE_URL` is only a fallback when the request host is missing or invalid.
 
 ### Docker Agent
 

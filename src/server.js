@@ -13,6 +13,15 @@ const publicBaseUrl = (process.env.PUBLIC_BASE_URL || `http://localhost:${port}`
 const githubRepo = process.env.GITHUB_REPO || 'Lorry-San/netpilot';
 const sessionTtlMs = 24 * 60 * 60 * 1000;
 const agentConnections = new Map();
+const uiClients = new Set();
+
+function broadcastTask(task, message) {
+  const data = JSON.stringify(message);
+  for (const client of uiClients) {
+    if (client.role !== 'admin' && client.userId !== task.user_id) continue;
+    if (client.socket.readyState === WebSocket.OPEN) client.socket.send(data);
+  }
+}
 
 function json(res, status, body, headers = {}) {
   res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', ...headers });
@@ -115,10 +124,18 @@ function userView(user) {
   };
 }
 
-function installCommands(agent, token) {
-  const wsUrl = publicBaseUrl.replace(/^http/, 'ws') + '/ws/agent';
+function requestBaseUrl(req) {
+  const forwardedProto = String(req.headers['x-forwarded-proto'] || '').split(',')[0].trim().toLowerCase();
+  const proto = forwardedProto === 'https' ? 'https' : 'http';
+  const host = String(req.headers.host || '').trim();
+  if (!/^(\[[0-9a-fA-F:]+\]|[A-Za-z0-9.-]+)(:\d{1,5})?$/.test(host)) return publicBaseUrl;
+  return `${proto}://${host}`;
+}
+
+function installCommands(agent, token, baseUrl = publicBaseUrl) {
+  const wsUrl = baseUrl.replace(/^http/, 'ws') + '/ws/agent';
   const image = `ghcr.io/${githubRepo.toLowerCase()}/netpilot-agent:latest`;
-  const script = `${publicBaseUrl}/install-agent.sh`;
+  const script = `${baseUrl}/install-agent.sh`;
   return {
     token,
     docker: `docker run -d --name netpilot-agent --restart unless-stopped \\\n+  -e NETPILOT_SERVER=${wsUrl} \\\n+  -e NETPILOT_TOKEN=${token} \\\n+  -e NETPILOT_AGENT_ID=${agent.id} \\\n+  -e NETPILOT_AGENT_NAME="${agent.name}" ${image}`,
@@ -127,18 +144,18 @@ function installCommands(agent, token) {
   };
 }
 
-function createAgent(name) {
+function createAgent(name, baseUrl) {
   const id = `agent_${randomToken(9)}`;
   const token = randomToken(32);
   const timestamp = now();
   run(`INSERT INTO agents (id, name, token_hash, created_at, updated_at) VALUES (?, ?, ?, ?, ?)`, id, name, hashToken(token), timestamp, timestamp);
-  return { agent: get('SELECT * FROM agents WHERE id = ?', id), commands: installCommands({ id, name }, token) };
+  return { agent: get('SELECT * FROM agents WHERE id = ?', id), commands: installCommands({ id, name }, token, baseUrl) };
 }
 
-function rotateAgentToken(agent) {
+function rotateAgentToken(agent, baseUrl) {
   const token = randomToken(32);
   run('UPDATE agents SET token_hash = ?, updated_at = ? WHERE id = ?', hashToken(token), now(), agent.id);
-  return installCommands(agent, token);
+  return installCommands(agent, token, baseUrl);
 }
 
 function remoteIp(req) {
@@ -195,16 +212,20 @@ function handleAgentMessage(socket, agentId, message) {
   if (type === 'task.stdout' || type === 'task.stderr') {
     const line = String(message.payload?.line ?? message.line ?? '');
     run('INSERT INTO test_output (test_id, stream, line, created_at) VALUES (?, ?, ?, ?)', taskId, type === 'task.stderr' ? 'stderr' : 'stdout', line, now());
+    broadcastTask(task, { type, taskId, payload: { line } });
   } else if (type === 'task.metric') {
     const p = message.payload || {};
     run('INSERT INTO test_metrics (test_id, second, send_mbps, recv_mbps, cpu_percent, memory_percent, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)', taskId, Number(p.second || 0), p.sendMbps ?? null, p.recvMbps ?? null, p.cpuPercent ?? null, p.memoryPercent ?? null, now());
+    broadcastTask(task, { type, taskId, payload: p });
   } else if (type === 'task.done') {
     const status = message.payload?.exitCode === 0 ? 'completed' : 'failed';
     run('UPDATE tests SET status = ?, finished_at = ?, result_json = ? WHERE id = ?', status, now(), JSON.stringify(message.payload || {}), taskId);
     run('UPDATE agents SET status = \'online\', updated_at = ? WHERE id = ?', now(), agentId);
+    broadcastTask(task, { type, taskId, payload: { ...(message.payload || {}), status } });
   } else if (type === 'task.error') {
     run('UPDATE tests SET status = \'failed\', finished_at = ?, result_json = ? WHERE id = ?', now(), JSON.stringify(message.payload || {}), taskId);
     run('UPDATE agents SET status = \'online\', updated_at = ? WHERE id = ?', now(), agentId);
+    broadcastTask(task, { type, taskId, payload: { ...(message.payload || {}), status: 'failed' } });
   }
 }
 
@@ -370,7 +391,7 @@ async function handleApi(req, res, pathname) {
     const body = await bodyJson(req);
     const name = String(body.name || '').trim();
     if (name.length < 1 || name.length > 80) return json(res, 400, { error: 'Agent 名称无效' });
-    const created = createAgent(name);
+    const created = createAgent(name, requestBaseUrl(req));
     audit(user.id, 'agent.create', created.agent.id, { name });
     return json(res, 201, { agent: agentView(created.agent), install: created.commands });
   }
@@ -380,7 +401,7 @@ async function handleApi(req, res, pathname) {
     const agent = get('SELECT * FROM agents WHERE id = ?', installMatch[1]);
     if (!agent) return json(res, 404, { error: 'Agent 不存在' });
     if (agent.status === 'online' || agentConnections.has(agent.id)) return json(res, 409, { error: 'Agent 在线时不能重新安装，请先断开 Agent' });
-    const install = rotateAgentToken(agent);
+    const install = rotateAgentToken(agent, requestBaseUrl(req));
     audit(user.id, 'agent.token.rotate', agent.id);
     return json(res, 200, { agent: agentView(get('SELECT * FROM agents WHERE id = ?', agent.id)), install });
   }
@@ -413,6 +434,25 @@ const server = createServer(async (req, res) => {
   }
 });
 
-const wss = new WebSocketServer({ server, path: '/ws/agent' });
+const wss = new WebSocketServer({ noServer: true });
 wss.on('connection', handleAgentSocket);
+
+const uiWss = new WebSocketServer({ noServer: true });
+uiWss.on('connection', async (socket, req) => {
+  const user = await sessionUser(req);
+  if (!user || user.disabled) { socket.close(4401, 'authentication required'); return; }
+  const client = { socket, userId: user.id, role: user.role };
+  uiClients.add(client);
+  const drop = () => uiClients.delete(client);
+  socket.on('close', drop);
+  socket.on('error', drop);
+});
+server.on('upgrade', (req, socket, head) => {
+  let pathname;
+  try { pathname = new URL(req.url || '/', 'http://localhost').pathname; } catch { socket.destroy(); return; }
+  if (pathname === '/ws/agent') wss.handleUpgrade(req, socket, head, (ws) => wss.emit('connection', ws, req));
+  else if (pathname === '/ws/ui') uiWss.handleUpgrade(req, socket, head, (ws) => uiWss.emit('connection', ws, req));
+  else socket.destroy();
+});
+
 server.listen(port, () => console.log(`[netpilot] listening on ${publicBaseUrl}`));

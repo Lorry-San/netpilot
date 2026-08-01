@@ -1,0 +1,16 @@
+services:
+  server:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-http://localhost:8080}
+      GITHUB_REPO: ${GITHUB_REPO:-Lorry-San/netpilot}
+      ADMIN_USERNAME: ${ADMIN_USERNAME:-admin}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:?set ADMIN_PASSWORD in .env}
+    volumes:
+      - netpilot-data:/data
+
+volumes:
+  netpilot-data:

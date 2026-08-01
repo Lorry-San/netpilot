@@ -1,0 +1,71 @@
+﻿import assert from 'node:assert/strict';
+import { once } from 'node:events';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { createServer as createNetServer } from 'node:net';
+import { tmpdir } from 'node:os';
+import { join, resolve } from 'node:path';
+import { spawn } from 'node:child_process';
+import test from 'node:test';
+
+async function unusedPort() {
+  const server = createNetServer();
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  const port = server.address().port;
+  server.close();
+  await once(server, 'close');
+  return port;
+}
+
+async function waitForServer(child) {
+  let output = '';
+  child.stdout.on('data', (chunk) => { output += chunk.toString(); });
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    if (output.includes('listening on')) return;
+    if (child.exitCode !== null) throw new Error(`server exited early: ${child.exitCode}`);
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 30));
+  }
+  throw new Error('server did not start in time');
+}
+
+test('static assets and installer script are served', async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), 'netpilot-static-'));
+  const port = await unusedPort();
+  const base = `http://127.0.0.1:${port}`;
+  const root = resolve(import.meta.dirname, '..');
+  const child = spawn(process.execPath, ['src/server.js'], {
+    cwd: root,
+    env: { ...process.env, PORT: String(port), PUBLIC_BASE_URL: base, DB_PATH: join(directory, 'test.sqlite'), ADMIN_PASSWORD: 'Static-Test-Password-2026' },
+    stdio: ['ignore', 'pipe', 'pipe']
+  });
+  t.after(async () => {
+    child.kill('SIGTERM');
+    await Promise.race([once(child, 'exit'), new Promise((resolvePromise) => setTimeout(resolvePromise, 2000))]);
+    await rm(directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+  });
+  await waitForServer(child);
+
+  const index = await fetch(`${base}/`);
+  assert.equal(index.status, 200);
+  const indexHtml = await index.text();
+  assert.match(indexHtml, /password/i);
+
+  for (const asset of ['/app.js', '/styles.css']) {
+    const response = await fetch(base + asset);
+    assert.equal(response.status, 200, asset);
+    assert.ok((await response.text()).length > 1000, asset);
+  }
+
+  const installer = await fetch(`${base}/install-agent.sh`);
+  assert.equal(installer.status, 200);
+  const script = await installer.text();
+  assert.match(script, /x86_64\|amd64/);
+  assert.match(script, /aarch64\|arm64/);
+  assert.match(script, /systemctl/);
+  assert.match(script, /openrc-run/);
+
+  const missing = await fetch(`${base}/../src/server.js`);
+  assert.notEqual(missing.status, 200);
+  const traversal = await fetch(`${base}/%2e%2e/%2e%2e/package.json`);
+  assert.notEqual(traversal.status, 200);
+});

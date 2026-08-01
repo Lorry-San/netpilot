@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>NetPilot</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <main id="login-view" class="login-shell">
+    <form id="login-form" class="login-panel">
+      <div class="brand"><span class="brand-mark">N</span><strong>NetPilot</strong></div>
+      <h1>登录控制台</h1>
+      <label>用户名<input id="login-username" autocomplete="username" value="admin" required></label>
+      <label>密码<input id="login-password" type="password" autocomplete="current-password" required></label>
+      <p id="login-error" class="error" role="alert"></p>
+      <button class="primary block" type="submit">登录</button>
+    </form>
+  </main>
+
+  <div id="app-view" class="app-shell" hidden>
+    <aside class="sidebar">
+      <div class="brand"><span class="brand-mark">N</span><strong>NetPilot</strong></div>
+      <nav>
+        <button data-view="tests" class="active">测试台</button>
+        <button data-view="agents">Agent</button>
+        <button data-view="users" data-admin-only>用户管理</button>
+      </nav>
+      <div class="account"><strong id="account-name"></strong><span id="account-role"></span></div>
+    </aside>
+    <div class="main-column">
+      <header class="topbar"><h1 id="page-title">网络性能测试</h1><button id="logout-button" class="secondary">退出登录</button></header>
+
+      <section id="view-tests" class="page">
+        <div class="metrics" id="agent-metrics">
+          <div><span>Agent</span><strong id="metric-agent">未选择</strong></div>
+          <div><span>CPU</span><strong id="metric-cpu">--</strong></div>
+          <div><span>内存</span><strong id="metric-memory">--</strong></div>
+          <div><span>上行占用</span><strong id="metric-upload">--</strong></div>
+          <div><span>下行占用</span><strong id="metric-download">--</strong></div>
+        </div>
+        <div class="test-grid">
+          <form id="test-form" class="panel form-grid">
+            <div class="panel-heading"><h2>测试参数</h2><span id="test-state" class="status">就绪</span></div>
+            <label>执行 Agent<select id="test-agent" required></select></label>
+            <div class="split"><label>目标 IP / 域名<input id="test-target" value="127.0.0.1" required></label><label>端口<input id="test-port" type="number" min="1" max="65535" value="5201" required></label></div>
+            <fieldset><legend>传输协议</legend><div class="segmented"><label><input type="radio" name="protocol" value="tcp" checked>TCP</label><label><input type="radio" name="protocol" value="udp">UDP</label></div></fieldset>
+            <label class="switch-row"><span>反向测试 (-R)</span><input id="test-reverse" type="checkbox"></label>
+            <label>测试时长<input id="test-duration" type="number" min="1" max="3600" value="15"></label>
+            <label>并行流<select id="test-parallel"><option>1</option><option>2</option><option selected>4</option><option>8</option></select></label>
+            <label id="bandwidth-row" hidden>UDP 目标带宽<input id="test-bandwidth" value="100M"></label>
+            <button id="start-test" class="primary" type="submit">开始测试</button>
+          </form>
+          <div class="result-column">
+            <section class="panel chart-panel"><div class="panel-heading"><h2>速率 / 时间</h2><strong id="current-rate">0 Mbps</strong></div><svg id="speed-chart" viewBox="0 0 720 260" role="img" aria-label="测试速率曲线"><g id="chart-grid"></g><polyline id="send-line" points=""></polyline><polyline id="recv-line" points=""></polyline></svg></section>
+            <section class="panel"><div class="panel-heading"><h2>原始输出</h2><button id="cancel-test" class="secondary" type="button" disabled>取消</button></div><pre id="raw-output">等待测试任务。</pre></section>
+          </div>
+        </div>
+        <section class="panel"><div class="panel-heading"><h2>最近任务</h2><button id="refresh-tests" class="secondary" type="button">刷新</button></div><div class="table-wrap"><table><thead><tr><th>目标</th><th>Agent</th><th>协议</th><th>状态</th><th>创建时间</th></tr></thead><tbody id="tests-body"></tbody></table></div></section>
+      </section>
+
+      <section id="view-agents" class="page" hidden>
+        <section class="panel"><div class="panel-heading"><h2>Agent 节点</h2><button id="add-agent" class="primary" data-admin-only type="button">添加 Agent</button></div><div class="table-wrap"><table><thead><tr><th>名称</th><th>状态</th><th>平台</th><th>公网 IP / 归属地</th><th>资源</th><th>操作</th></tr></thead><tbody id="agents-body"></tbody></table></div></section>
+        <section id="install-panel" class="panel" hidden><div class="panel-heading"><h2>安装 Agent</h2><button id="close-install" class="secondary" type="button">关闭</button></div><div class="install-content"><p>Token 仅在本次生成后展示。Agent 在线时不能重新生成安装命令。</p><label>Docker（Alpine x86-64）<textarea id="install-docker" rows="5" readonly></textarea></label><button class="secondary copy-command" data-target="install-docker">复制 Docker 命令</button><label>一键安装脚本（自动识别 x86-64 / arm64）<textarea id="install-script" rows="4" readonly></textarea></label><button class="secondary copy-command" data-target="install-script">复制脚本命令</button></div></section>
+      </section>
+
+      <section id="view-users" class="page" hidden data-admin-only>
+        <section class="panel"><div class="panel-heading"><h2>用户与角色</h2><button id="add-user" class="primary" type="button">新增用户</button></div><div class="table-wrap"><table><thead><tr><th>UID</th><th>用户</th><th>角色</th><th>状态</th><th>操作</th></tr></thead><tbody id="users-body"></tbody></table></div></section>
+      </section>
+    </div>
+  </div>
+
+  <dialog id="agent-dialog"><form id="agent-form" method="dialog"><div class="dialog-heading"><h2>添加 Agent</h2><button value="cancel" type="submit" class="icon-button" aria-label="关闭">×</button></div><label>Agent 名称<input id="agent-name" required maxlength="80" placeholder="上海边缘节点 01"></label><div class="dialog-actions"><button value="cancel" class="secondary">取消</button><button id="create-agent" value="default" class="primary">创建并生成命令</button></div></form></dialog>
+  <dialog id="user-dialog"><form id="user-form" method="dialog"><div class="dialog-heading"><h2>新增用户</h2><button value="cancel" type="submit" class="icon-button" aria-label="关闭">×</button></div><label>显示名称<input id="new-display-name" required maxlength="80"></label><label>用户名<input id="new-username" required pattern="[A-Za-z0-9._-]{3,64}"></label><label>初始密码<input id="new-password" type="password" minlength="12" required autocomplete="new-password"></label><label>角色<select id="new-role"><option value="user">普通用户</option><option value="admin">管理员</option></select></label><label id="new-agent-access-row">授权 Agent<select id="new-agent-ids" multiple size="4"></select></label><div class="dialog-actions"><button value="cancel" class="secondary">取消</button><button id="create-user" value="default" class="primary">创建用户</button></div></form></dialog>
+  <div id="toast" role="status" aria-live="polite"></div>
+  <script type="module" src="/app.js"></script>
+</body>
+</html>

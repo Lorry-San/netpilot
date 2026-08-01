@@ -1,0 +1,21 @@
+{
+  "name": "netpilot",
+  "version": "0.1.0",
+  "private": false,
+  "description": "Web-controlled iperf3 testing platform with Go agents",
+  "license": "AGPL-3.0-only",
+  "type": "module",
+  "engines": {
+    "node": ">=22.5"
+  },
+  "scripts": {
+    "dev": "node --watch src/server.js",
+    "start": "node src/server.js",
+    "check": "node --check src/server.js",
+    "test": "node --test",
+    "format": "node --check src/server.js"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  }
+}

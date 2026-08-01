@@ -138,7 +138,7 @@ function installCommands(agent, token, baseUrl = publicBaseUrl) {
   const script = `${baseUrl}/install-agent.sh`;
   return {
     token,
-    docker: `docker run -d --name netpilot-agent --restart unless-stopped \\\n+  -e NETPILOT_SERVER=${wsUrl} \\\n+  -e NETPILOT_TOKEN=${token} \\\n+  -e NETPILOT_AGENT_ID=${agent.id} \\\n+  -e NETPILOT_AGENT_NAME="${agent.name}" ${image}`,
+    docker: `docker run -d --name netpilot-agent --restart unless-stopped \\\n  -e NETPILOT_SERVER=${wsUrl} \\\n  -e NETPILOT_TOKEN=${token} \\\n  -e NETPILOT_AGENT_ID=${agent.id} \\\n  -e NETPILOT_AGENT_NAME="${agent.name}" ${image}`,
     script: `curl -fsSL ${script} | NETPILOT_SERVER=${wsUrl} NETPILOT_TOKEN=${token} NETPILOT_AGENT_ID=${agent.id} NETPILOT_AGENT_NAME="${agent.name}" sh`,
     binary: `NETPILOT_SERVER=${wsUrl} NETPILOT_TOKEN=${token} NETPILOT_AGENT_ID=${agent.id} NETPILOT_AGENT_NAME="${agent.name}" ./netpilot-agent`
   };

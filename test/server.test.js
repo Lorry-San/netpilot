@@ -81,6 +81,9 @@ test('security invariants, roles and Agent installation lock', async (t) => {
   const createdAgent = await request(base, '/api/admin/agents', { method: 'POST', body: JSON.stringify({ name: 'CI Agent' }) }, session);
   assert.equal(createdAgent.response.status, 201);
   assert.ok(createdAgent.body.install.token.length > 30);
+  assert.match(createdAgent.body.install.docker, /^docker run -d/);
+  assert.doesNotMatch(createdAgent.body.install.docker, /\+\s+-e/);
+  assert.match(createdAgent.body.install.docker, /\\\n\s+-e NETPILOT_SERVER=/);
   const agentID = createdAgent.body.agent.id;
   const storedAgent = database.prepare('SELECT * FROM agents WHERE id = ?').get(agentID);
   assert.equal(storedAgent.token_hash.length, 64);

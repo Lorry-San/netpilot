@@ -92,7 +92,7 @@ test('security invariants, roles and Agent installation lock', async (t) => {
   const root = resolve(import.meta.dirname, '..');
   const child = spawn(process.execPath, ['src/server.js'], {
     cwd: root,
-    env: { ...process.env, PORT: String(port), PUBLIC_BASE_URL: base, DB_PATH: dbPath, ADMIN_PASSWORD: 'Integration-Test-Password-2026' },
+    env: { ...process.env, PORT: String(port), PUBLIC_BASE_URL: base, DB_PATH: dbPath, ADMIN_PASSWORD: 'Integration-Test-Password-2026', NETPILOT_DISABLE_TELEGRAM: '1' },
     stdio: ['ignore', 'pipe', 'pipe']
   });
   let database;
@@ -305,7 +305,7 @@ test('security invariants, roles and Agent installation lock', async (t) => {
 
   const version = await request(base, '/api/system/version', {}, session);
   assert.equal(version.response.status, 200);
-  assert.equal(version.body.current, '0.1.9');
+  assert.equal(version.body.current, '0.1.10');
   assert.ok(Object.hasOwn(version.body, 'updateAvailable'));
 
   socket.close();

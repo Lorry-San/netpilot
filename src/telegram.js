@@ -335,6 +335,7 @@ async function poll(generation, botToken) {
 }
 
 export async function startTelegramBot() {
+  if (process.env.NETPILOT_DISABLE_TELEGRAM === '1') return;
   if (!api || !db) return;
   const generation = ++botGeneration;
   const botToken = token();

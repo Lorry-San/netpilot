@@ -544,6 +544,24 @@ function handleAgentMessage(socket, agentId, message) {
   }
 }
 
+function finalizeAgentDisconnect(agentId, attempt = 0) {
+  try {
+    run('UPDATE agents SET status = \'offline\', updated_at = ? WHERE id = ?', now(), agentId);
+    const active = get('SELECT id FROM tests WHERE agent_id = ? AND status IN (\'queued\', \'running\')', agentId);
+    if (active) {
+      run('UPDATE tests SET status = \'failed\', finished_at = ?, result_json = ? WHERE id = ?', now(), JSON.stringify({ error: 'Agent disconnected' }), active.id);
+      emitTaskComplete(active.id);
+    }
+  } catch (error) {
+    if ((error.errcode === 5 || String(error.message).includes('database is locked')) && attempt < 3) {
+      const retry = setTimeout(() => finalizeAgentDisconnect(agentId, attempt + 1), 100 * (attempt + 1));
+      retry.unref?.();
+      return;
+    }
+    console.error(`[netpilot] failed to finalize disconnect for ${agentId}:`, error);
+  }
+}
+
 function handleAgentSocket(socket, req) {
   let agentId = null;
   let authenticated = false;
@@ -574,12 +592,7 @@ function handleAgentSocket(socket, req) {
     clearTimeout(authTimer);
     if (!agentId || agentConnections.get(agentId) !== socket) return;
     agentConnections.delete(agentId);
-    run('UPDATE agents SET status = \'offline\', updated_at = ? WHERE id = ?', now(), agentId);
-    const active = get('SELECT id FROM tests WHERE agent_id = ? AND status IN (\'queued\', \'running\')', agentId);
-    if (active) {
-      run('UPDATE tests SET status = \'failed\', finished_at = ?, result_json = ? WHERE id = ?', now(), JSON.stringify({ error: 'Agent disconnected' }), active.id);
-      emitTaskComplete(active.id);
-    }
+    finalizeAgentDisconnect(agentId);
   });
 }
 

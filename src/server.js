@@ -174,6 +174,17 @@ function setSetting(key, value) {
   run('INSERT INTO settings (key, value, updated_at) VALUES (?, ?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at', key, value, now());
 }
 
+async function validateTelegramBotToken(value) {
+  try {
+    const response = await fetch(`https://api.telegram.org/bot${value}/getMe`, { signal: AbortSignal.timeout(8000) });
+    const result = await response.json().catch(() => ({}));
+    if (!response.ok || !result.ok || !result.result?.username) throw new Error(result.description || `HTTP ${response.status}`);
+    return String(result.result.username);
+  } catch (error) {
+    throw Object.assign(new Error(`Telegram Bot 连接失败：${error.message}`), { status: 400 });
+  }
+}
+
 function normalizeBaseUrl(value, schemes) {
   const trimmed = String(value || '').trim().replace(/\/+$/, '');
   if (!trimmed) return '';
@@ -645,7 +656,9 @@ async function handleApi(req, res, pathname) {
           scriptBase: settings.script_base || '',
           githubAccelEnabled: settings.github_accel_enabled === '1',
           githubAccelDomain: settings.github_accel_domain || '',
-          telegramBotToken: settings.telegram_bot_token || ''
+          telegramBotToken: settings.telegram_bot_token || '',
+          telegramBotEnabled: Boolean(settings.telegram_bot_token),
+          telegramBotUsername: settings.telegram_bot_username || ''
         }
       });
     }
@@ -659,17 +672,26 @@ async function handleApi(req, res, pathname) {
       if (githubAccelDomain === null) return json(res, 400, { error: 'GitHub 加速域名格式无效，示例：https://ghproxy.net' });
       const enabled = Boolean(body.githubAccelEnabled);
       if (enabled && !githubAccelDomain) return json(res, 400, { error: '启用 GitHub 加速时必须填写加速域名' });
-      const telegramBotToken = String(body.telegramBotToken || '').trim();
-      if (telegramBotToken && !/^\d{6,12}:[A-Za-z0-9_-]{30,60}$/.test(telegramBotToken)) return json(res, 400, { error: 'Telegram Bot Token 格式无效' });
+      const currentSettings = getSettings();
+      const telegramTokenSubmitted = Object.hasOwn(body, 'telegramBotToken');
+      const telegramBotToken = telegramTokenSubmitted ? String(body.telegramBotToken || '').trim() : (currentSettings.telegram_bot_token || '');
+      if (telegramTokenSubmitted && telegramBotToken && !/^\d{6,12}:[A-Za-z0-9_-]{30,60}$/.test(telegramBotToken)) return json(res, 400, { error: 'Telegram Bot Token 格式无效' });
+      let telegramBotUsername = currentSettings.telegram_bot_username || '';
+      const telegramTokenChanged = telegramTokenSubmitted && telegramBotToken !== (currentSettings.telegram_bot_token || '');
+      if (telegramTokenSubmitted && telegramBotToken && (telegramTokenChanged || !telegramBotUsername)) telegramBotUsername = await validateTelegramBotToken(telegramBotToken);
+      else if (telegramTokenSubmitted && !telegramBotToken) telegramBotUsername = '';
       setSetting('agent_ws_base', agentWsBase);
       setSetting('script_base', scriptBase);
       setSetting('github_accel_enabled', enabled ? '1' : '0');
       setSetting('github_accel_domain', githubAccelDomain);
-      setSetting('telegram_bot_token', telegramBotToken);
+      if (telegramTokenSubmitted) {
+        setSetting('telegram_bot_token', telegramBotToken);
+        setSetting('telegram_bot_username', telegramBotUsername);
+      }
       latestReleaseCache.checkedAt = 0;
-      if (typeof globalThis.netpilotTelegramReload === 'function') globalThis.netpilotTelegramReload();
-      audit(user.id, 'settings.update', 'settings', { agentWsBase, scriptBase, githubAccelEnabled: enabled, githubAccelDomain, telegramBotToken: telegramBotToken ? 'updated' : 'cleared' });
-      return json(res, 200, { ok: true });
+      if (telegramTokenChanged && typeof globalThis.netpilotTelegramReload === 'function') globalThis.netpilotTelegramReload();
+      audit(user.id, 'settings.update', 'settings', { agentWsBase, scriptBase, githubAccelEnabled: enabled, githubAccelDomain, telegramBotToken: telegramTokenChanged ? (telegramBotToken ? 'updated' : 'cleared') : 'unchanged' });
+      return json(res, 200, { ok: true, telegramBot: { enabled: Boolean(telegramBotToken), username: telegramBotUsername } });
     }
     return json(res, 405, { error: 'Method not allowed' });
   }

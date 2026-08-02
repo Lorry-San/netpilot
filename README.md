@@ -160,7 +160,7 @@ The system administrator is always `uid=1`. API requests that attempt to delete,
 
 ## Telegram Bot
 
-The `uid=1` system administrator can paste a BotFather token under **System Settings**. NetPilot uses Telegram Bot API long polling from the Node.js process, so no public webhook endpoint is required. Clearing the token stops the Bot.
+The `uid=1` system administrator can paste a BotFather token under **System Settings**. NetPilot validates it with `getMe` and shows the connected Bot username before starting Telegram Bot API long polling from the Node.js process, so no public webhook endpoint is required. Clearing the token stops the Bot.
 
 Each user binds one Telegram account from **Account Settings**:
 

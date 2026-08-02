@@ -136,7 +136,9 @@ test('security invariants, roles and Agent installation lock', async (t) => {
     scriptBase: '',
     githubAccelEnabled: false,
     githubAccelDomain: '',
-    telegramBotToken: ''
+    telegramBotToken: '',
+    telegramBotEnabled: false,
+    telegramBotUsername: ''
   });
   const invalidSettings = await request(base, '/api/settings', {
     method: 'PUT',
@@ -159,13 +161,23 @@ test('security invariants, roles and Agent installation lock', async (t) => {
     scriptBase: 'https://downloads.example.com',
     githubAccelEnabled: true,
     githubAccelDomain: 'https://ghproxy.example.com',
-    telegramBotToken: ''
+    telegramBotToken: '',
+    telegramBotEnabled: false,
+    telegramBotUsername: ''
   });
   const invalidTelegramToken = await request(base, '/api/settings', {
     method: 'PUT',
     body: JSON.stringify({ agentWsBase: '', scriptBase: '', githubAccelEnabled: false, githubAccelDomain: '', telegramBotToken: 'not-a-token' })
   }, session);
   assert.equal(invalidTelegramToken.response.status, 400);
+  database.prepare("INSERT INTO settings (key, value, updated_at) VALUES ('telegram_bot_token', '123456789:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value").run(new Date().toISOString());
+  const legacySettingsSave = await request(base, '/api/settings', {
+    method: 'PUT',
+    body: JSON.stringify({ agentWsBase: 'wss://agents.example.com:8443', scriptBase: 'https://downloads.example.com', githubAccelEnabled: true, githubAccelDomain: 'https://ghproxy.example.com' })
+  }, session);
+  assert.equal(legacySettingsSave.response.status, 200);
+  assert.equal(database.prepare("SELECT value FROM settings WHERE key = 'telegram_bot_token'").get().value, '123456789:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA');
+  database.prepare("DELETE FROM settings WHERE key IN ('telegram_bot_token', 'telegram_bot_username')").run();
 
   const createdAgent = await request(base, '/api/admin/agents', { method: 'POST', body: JSON.stringify({ name: "CI Agent's node" }) }, session);
   assert.equal(createdAgent.response.status, 201);
@@ -293,7 +305,7 @@ test('security invariants, roles and Agent installation lock', async (t) => {
 
   const version = await request(base, '/api/system/version', {}, session);
   assert.equal(version.response.status, 200);
-  assert.equal(version.body.current, '0.1.8');
+  assert.equal(version.body.current, '0.1.9');
   assert.ok(Object.hasOwn(version.body, 'updateAvailable'));
 
   socket.close();

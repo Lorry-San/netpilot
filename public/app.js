@@ -232,6 +232,9 @@ async function loadSettings() {
   $('#setting-github-accel-enabled').checked = result.settings.githubAccelEnabled;
   $('#setting-github-accel-domain').value = result.settings.githubAccelDomain;
   $('#setting-telegram-token').value = result.settings.telegramBotToken;
+  $('#setting-telegram-status').textContent = result.settings.telegramBotEnabled
+    ? `当前已连接 @${result.settings.telegramBotUsername || '未知 Bot'}`
+    : '当前未启用';
   state.settingsLoaded = true;
   syncAccelField();
 }
@@ -699,7 +702,7 @@ $('#settings-form').addEventListener('submit', async (event) => {
   const saveButton = $('#save-settings');
   saveButton.disabled = true;
   try {
-    await api('/api/settings', {
+    const result = await api('/api/settings', {
       method: 'PUT',
       body: JSON.stringify({
         agentWsBase: $('#setting-agent-ws').value,
@@ -710,7 +713,8 @@ $('#settings-form').addEventListener('submit', async (event) => {
       })
     });
     await loadSettings();
-    toast('系统设置已保存，新生成的安装和更新命令会使用这些地址');
+    const botMessage = result.telegramBot?.enabled ? `，Telegram Bot @${result.telegramBot.username} 已连接` : '，Telegram Bot 未启用';
+    toast(`系统设置已保存${botMessage}`);
   } catch (error) { toast(error.message); }
   finally { saveButton.disabled = false; }
 });

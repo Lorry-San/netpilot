@@ -1,4 +1,4 @@
-const state = { user: null, agents: [], users: [], tests: [], activeTestId: null, pollTimer: null };
+const state = { user: null, agents: [], users: [], tests: [], activeTestId: null, pollTimer: null, settingsLoaded: false };
 const $ = (selector) => document.querySelector(selector);
 const $$ = (selector) => [...document.querySelectorAll(selector)];
 
@@ -121,6 +121,7 @@ async function showApp(user) {
   $('#account-name').textContent = user.displayName;
   $('#account-role').textContent = `${user.username} · ${roleLabel(user.role)}`;
   $$('[data-admin-only]').forEach((node) => { node.hidden = user.role !== 'admin'; });
+  $$('[data-system-admin-only]').forEach((node) => { node.hidden = user.id !== 1; });
   setView('tests');
   try {
     await Promise.all([loadAgents(), loadTests(), user.role === 'admin' ? loadUsers() : Promise.resolve()]);
@@ -128,6 +129,7 @@ async function showApp(user) {
     console.error(error);
     toast(`数据加载失败：${error.message}`);
   }
+  loadVersion().catch(() => {});
   connectLive();
   clearInterval(state.pollTimer);
   state.pollTimer = setInterval(async () => {
@@ -138,9 +140,50 @@ async function showApp(user) {
 
 function setView(name) {
   if (name === 'users' && state.user?.role !== 'admin') return;
+  if (name === 'settings' && state.user?.id !== 1) return;
   $$('.page').forEach((node) => { node.hidden = node.id !== `view-${name}`; });
   $('.sidebar nav').querySelectorAll('button').forEach((node) => node.classList.toggle('active', node.dataset.view === name));
-  $('#page-title').textContent = { tests: '网络性能测试', agents: 'Agent 管理', users: '用户管理' }[name];
+  $('#page-title').textContent = { tests: '网络性能测试', agents: 'Agent 管理', users: '用户管理', settings: '系统设置' }[name];
+}
+
+async function loadVersion(refresh = false) {
+  const result = await api(`/api/system/version${refresh ? '?refresh=1' : ''}`);
+  const notice = $('#version-notice');
+  $('#current-version').textContent = `v${result.current}`;
+  $('#latest-version').textContent = result.latest ? `v${result.latest}` : '检测失败';
+  notice.hidden = false;
+  notice.classList.toggle('update', result.updateAvailable === true);
+  if (result.updateAvailable) {
+    notice.textContent = `发现 v${result.latest}`;
+    $('#version-message').textContent = `发现新版本 v${result.latest}，请在服务器执行更新命令。`;
+  } else if (result.updateAvailable === false) {
+    notice.textContent = `v${result.current}`;
+    $('#version-message').textContent = '当前已经是最新版本。';
+  } else {
+    notice.textContent = `v${result.current}`;
+    $('#version-message').textContent = '暂时无法获取 GitHub 最新版本，稍后可重新检测。';
+  }
+  const releaseLink = $('#release-link');
+  releaseLink.hidden = !result.releaseUrl;
+  releaseLink.href = result.releaseUrl || '#';
+  notice.href = result.releaseUrl || '#';
+  if (!result.releaseUrl) notice.removeAttribute('href');
+}
+
+function syncAccelField() {
+  const enabled = $('#setting-github-accel-enabled').checked;
+  $('#setting-github-accel-domain').required = enabled;
+}
+
+async function loadSettings() {
+  if (state.user?.id !== 1) return;
+  const result = await api('/api/settings');
+  $('#setting-agent-ws').value = result.settings.agentWsBase;
+  $('#setting-script-base').value = result.settings.scriptBase;
+  $('#setting-github-accel-enabled').checked = result.settings.githubAccelEnabled;
+  $('#setting-github-accel-domain').value = result.settings.githubAccelDomain;
+  state.settingsLoaded = true;
+  syncAccelField();
 }
 
 function renderAgentSelect() {
@@ -395,8 +438,33 @@ $('#logout-button').addEventListener('click', async () => {
 
 $('.sidebar nav').addEventListener('click', (event) => {
   const target = event.target.closest('[data-view]');
-  if (target) setView(target.dataset.view);
+  if (!target) return;
+  setView(target.dataset.view);
+  if (target.dataset.view === 'settings' && !state.settingsLoaded) loadSettings().catch((error) => toast(error.message));
 });
+
+$('#setting-github-accel-enabled').addEventListener('change', syncAccelField);
+$('#settings-form').addEventListener('submit', async (event) => {
+  event.preventDefault();
+  if (!event.currentTarget.reportValidity()) return;
+  const saveButton = $('#save-settings');
+  saveButton.disabled = true;
+  try {
+    await api('/api/settings', {
+      method: 'PUT',
+      body: JSON.stringify({
+        agentWsBase: $('#setting-agent-ws').value,
+        scriptBase: $('#setting-script-base').value,
+        githubAccelEnabled: $('#setting-github-accel-enabled').checked,
+        githubAccelDomain: $('#setting-github-accel-domain').value
+      })
+    });
+    await loadSettings();
+    toast('系统设置已保存，新生成的安装命令将使用这些地址');
+  } catch (error) { toast(error.message); }
+  finally { saveButton.disabled = false; }
+});
+$('#refresh-version').addEventListener('click', () => loadVersion(true).catch((error) => toast(error.message)));
 
 $('#test-agent').addEventListener('change', updateSelectedAgent);
 $$('input[name="protocol"]').forEach((input) => input.addEventListener('change', () => { $('#bandwidth-row').hidden = input.value !== 'udp' || !input.checked; }));

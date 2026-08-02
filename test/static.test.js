@@ -52,6 +52,11 @@ test('static assets and installer script are served', async (t) => {
   assert.match(indexHtml, /password/i);
   assert.doesNotMatch(indexHtml, /id="login-username"[^>]*value=/);
   assert.equal((indexHtml.match(/formnovalidate/g) || []).length, 4);
+  assert.match(indexHtml, /id="view-settings"[^>]*data-system-admin-only/);
+  assert.match(indexHtml, /id="setting-agent-ws"/);
+  assert.match(indexHtml, /id="setting-script-base"/);
+  assert.match(indexHtml, /id="setting-github-accel-enabled"/);
+  assert.match(indexHtml, /id="current-version"/);
 
   for (const asset of ['/app.js', '/styles.css']) {
     const response = await fetch(base + asset);
@@ -66,6 +71,7 @@ test('static assets and installer script are served', async (t) => {
   assert.match(script, /aarch64\|arm64/);
   assert.match(script, /systemctl/);
   assert.match(script, /openrc-run/);
+  assert.match(script, /NETPILOT_GITHUB_ACCEL/);
 
   const missing = await fetch(`${base}/../src/server.js`);
   assert.notEqual(missing.status, 200);

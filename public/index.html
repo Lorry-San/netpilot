@@ -25,11 +25,12 @@
         <button data-view="tests" class="active">测试台</button>
         <button data-view="agents">Agent</button>
         <button data-view="users" data-admin-only>用户管理</button>
+        <button data-view="settings" data-system-admin-only>系统设置</button>
       </nav>
       <div class="account"><strong id="account-name"></strong><span id="account-role"></span></div>
     </aside>
     <div class="main-column">
-      <header class="topbar"><h1 id="page-title">网络性能测试</h1><button id="logout-button" class="secondary">退出登录</button></header>
+      <header class="topbar"><h1 id="page-title">网络性能测试</h1><div class="topbar-actions"><a id="version-notice" class="version-badge" target="_blank" rel="noreferrer" hidden></a><button id="logout-button" class="secondary">退出登录</button></div></header>
 
       <section id="view-tests" class="page">
         <div class="metrics" id="agent-metrics">
@@ -66,6 +67,40 @@
 
       <section id="view-users" class="page" hidden data-admin-only>
         <section class="panel"><div class="panel-heading"><h2>用户与角色</h2><button id="add-user" class="primary" type="button">新增用户</button></div><div class="table-wrap"><table><thead><tr><th>UID</th><th>用户</th><th>角色</th><th>状态</th><th>操作</th></tr></thead><tbody id="users-body"></tbody></table></div></section>
+      </section>
+
+      <section id="view-settings" class="page" hidden data-system-admin-only>
+        <div class="settings-layout">
+          <form id="settings-form" class="panel settings-form">
+            <div class="panel-heading"><h2>连接与下载地址</h2><button id="save-settings" class="primary" type="submit">保存设置</button></div>
+            <div class="settings-content">
+              <p class="help">留空时自动使用管理员生成安装命令时所访问的域名。地址不要包含路径或结尾斜杠。</p>
+              <label>Agent WebSocket 地址
+                <input id="setting-agent-ws" type="url" placeholder="wss://iperf.example.com">
+                <small>Agent 长连接使用的地址；支持 <code>wss://</code>、<code>ws://</code> 和端口。</small>
+              </label>
+              <label>安装脚本拉取地址
+                <input id="setting-script-base" type="url" placeholder="https://iperf.example.com">
+                <small>一键安装命令下载 <code>/install-agent.sh</code> 使用的地址。</small>
+              </label>
+              <label class="switch-row"><span>使用 GitHub 加速</span><input id="setting-github-accel-enabled" type="checkbox"></label>
+              <label>GitHub 加速地址
+                <input id="setting-github-accel-domain" type="url" placeholder="https://ghproxy.net">
+                <small>加速地址会作为 GitHub 下载 URL 的前缀。</small>
+              </label>
+            </div>
+          </form>
+          <section class="panel version-panel">
+            <div class="panel-heading"><h2>版本检测</h2><button id="refresh-version" class="secondary" type="button">重新检测</button></div>
+            <div class="version-content">
+              <div><span>当前版本</span><strong id="current-version">--</strong></div>
+              <div><span>最新版本</span><strong id="latest-version">检测中</strong></div>
+              <p id="version-message" class="help">正在从 GitHub 检测最新版本。</p>
+              <a id="release-link" target="_blank" rel="noreferrer" hidden>查看 GitHub Release</a>
+              <label>服务器更新命令<textarea rows="2" readonly>cd /opt/netpilot && sh scripts/update.sh</textarea></label>
+            </div>
+          </section>
+        </div>
       </section>
     </div>
   </div>

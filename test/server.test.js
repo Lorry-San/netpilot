@@ -78,12 +78,47 @@ test('security invariants, roles and Agent installation lock', async (t) => {
   const remove = await request(base, '/api/users/1', { method: 'DELETE' }, session);
   assert.equal(remove.response.status, 400);
 
-  const createdAgent = await request(base, '/api/admin/agents', { method: 'POST', body: JSON.stringify({ name: 'CI Agent' }) }, session);
+  const defaultSettings = await request(base, '/api/settings', {}, session);
+  assert.equal(defaultSettings.response.status, 200);
+  assert.deepEqual(defaultSettings.body.settings, {
+    agentWsBase: '',
+    scriptBase: '',
+    githubAccelEnabled: false,
+    githubAccelDomain: ''
+  });
+  const invalidSettings = await request(base, '/api/settings', {
+    method: 'PUT',
+    body: JSON.stringify({ agentWsBase: 'wss://agents.example.com/path', scriptBase: '', githubAccelEnabled: false, githubAccelDomain: '' })
+  }, session);
+  assert.equal(invalidSettings.response.status, 400);
+  const savedSettings = await request(base, '/api/settings', {
+    method: 'PUT',
+    body: JSON.stringify({
+      agentWsBase: 'wss://agents.example.com:8443/',
+      scriptBase: 'https://downloads.example.com/',
+      githubAccelEnabled: true,
+      githubAccelDomain: 'https://ghproxy.example.com/'
+    })
+  }, session);
+  assert.equal(savedSettings.response.status, 200);
+  const settings = await request(base, '/api/settings', {}, session);
+  assert.deepEqual(settings.body.settings, {
+    agentWsBase: 'wss://agents.example.com:8443',
+    scriptBase: 'https://downloads.example.com',
+    githubAccelEnabled: true,
+    githubAccelDomain: 'https://ghproxy.example.com'
+  });
+
+  const createdAgent = await request(base, '/api/admin/agents', { method: 'POST', body: JSON.stringify({ name: "CI Agent's node" }) }, session);
   assert.equal(createdAgent.response.status, 201);
   assert.ok(createdAgent.body.install.token.length > 30);
   assert.match(createdAgent.body.install.docker, /^docker run -d/);
   assert.doesNotMatch(createdAgent.body.install.docker, /\+\s+-e/);
   assert.match(createdAgent.body.install.docker, /\\\n\s+-e NETPILOT_SERVER=/);
+  assert.match(createdAgent.body.install.docker, /wss:\/\/agents\.example\.com:8443\/ws\/agent/);
+  assert.match(createdAgent.body.install.docker, /CI Agent'"'"'s node/);
+  assert.match(createdAgent.body.install.script, /^curl -fsSL 'https:\/\/downloads\.example\.com\/install-agent\.sh'/);
+  assert.match(createdAgent.body.install.script, /NETPILOT_GITHUB_ACCEL='https:\/\/ghproxy\.example\.com\/'/);
   const agentID = createdAgent.body.agent.id;
   const storedAgent = database.prepare('SELECT * FROM agents WHERE id = ?').get(agentID);
   assert.equal(storedAgent.token_hash.length, 64);
@@ -110,6 +145,20 @@ test('security invariants, roles and Agent installation lock', async (t) => {
   const assignedAgents = await request(base, '/api/agents', {}, userSession);
   assert.equal(assignedAgents.response.status, 200);
   assert.deepEqual(assignedAgents.body.agents.map((agent) => agent.id), [agentID]);
+  const forbiddenSettings = await request(base, '/api/settings', {}, userSession);
+  assert.equal(forbiddenSettings.response.status, 403);
+
+  const secondAdmin = await request(base, '/api/users', { method: 'POST', body: JSON.stringify({ username: 'backup-admin', displayName: 'Backup Admin', password: 'Backup-Admin-Password-2026', role: 'admin' }) }, session);
+  assert.equal(secondAdmin.response.status, 201);
+  const secondAdminLogin = await request(base, '/api/auth/login', { method: 'POST', body: JSON.stringify({ username: 'backup-admin', password: 'Backup-Admin-Password-2026' }) });
+  const secondAdminSession = secondAdminLogin.response.headers.get('set-cookie').split(';', 1)[0];
+  const adminForbiddenSettings = await request(base, '/api/settings', {}, secondAdminSession);
+  assert.equal(adminForbiddenSettings.response.status, 403);
+
+  const version = await request(base, '/api/system/version', {}, session);
+  assert.equal(version.response.status, 200);
+  assert.equal(version.body.current, '0.1.2');
+  assert.ok(Object.hasOwn(version.body, 'updateAvailable'));
 
   socket.close();
   await once(socket, 'close');

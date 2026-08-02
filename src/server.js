@@ -124,6 +124,63 @@ function userView(user) {
   };
 }
 
+const currentVersion = JSON.parse(readFileSync(join(rootDir, 'package.json'), 'utf8')).version || '0.0.0';
+
+function getSettings() {
+  return Object.fromEntries(all('SELECT key, value FROM settings').map((row) => [row.key, row.value]));
+}
+
+function setSetting(key, value) {
+  run('INSERT INTO settings (key, value, updated_at) VALUES (?, ?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at', key, value, now());
+}
+
+function normalizeBaseUrl(value, schemes) {
+  const trimmed = String(value || '').trim().replace(/\/+$/, '');
+  if (!trimmed) return '';
+  try {
+    const parsed = new URL(trimmed);
+    const scheme = parsed.protocol.slice(0, -1);
+    if (!schemes.includes(scheme) || !parsed.hostname || parsed.username || parsed.password || parsed.pathname !== '/' || parsed.search || parsed.hash) return null;
+    return `${scheme}://${parsed.host}`;
+  } catch {
+    return null;
+  }
+}
+
+function shellQuote(value) {
+  return `'${String(value).replaceAll("'", `'"'"'`)}'`;
+}
+
+function compareVersions(a, b) {
+  const pa = String(a).replace(/^v/, '').split('.').map((part) => Number(part) || 0);
+  const pb = String(b).replace(/^v/, '').split('.').map((part) => Number(part) || 0);
+  for (let index = 0; index < Math.max(pa.length, pb.length); index += 1) {
+    const diff = (pa[index] || 0) - (pb[index] || 0);
+    if (diff !== 0) return diff;
+  }
+  return 0;
+}
+
+let latestReleaseCache = { checkedAt: 0, data: null };
+async function fetchLatestRelease() {
+  const nowMs = Date.now();
+  if (latestReleaseCache.checkedAt && nowMs - latestReleaseCache.checkedAt < 30 * 60 * 1000) return latestReleaseCache.data;
+  latestReleaseCache.checkedAt = nowMs;
+  try {
+    const settings = getSettings();
+    const accel = settings.github_accel_enabled === '1' ? String(settings.github_accel_domain || '').trim() : '';
+    const apiUrl = `https://api.github.com/repos/${githubRepo}/releases/latest`;
+    const url = accel ? `${accel.endsWith('/') ? accel : `${accel}/`}${apiUrl}` : apiUrl;
+    const response = await fetch(url, { headers: { 'user-agent': 'netpilot-version-check', accept: 'application/vnd.github+json' }, signal: AbortSignal.timeout(6000) });
+    if (!response.ok) throw new Error(`GitHub responded ${response.status}`);
+    const data = await response.json();
+    latestReleaseCache.data = { tag: String(data.tag_name || ''), url: String(data.html_url || ''), publishedAt: String(data.published_at || '') };
+  } catch {
+    if (!latestReleaseCache.data) latestReleaseCache.data = null;
+  }
+  return latestReleaseCache.data;
+}
+
 function requestBaseUrl(req) {
   const forwardedProto = String(req.headers['x-forwarded-proto'] || '').split(',')[0].trim().toLowerCase();
   const proto = forwardedProto === 'https' ? 'https' : 'http';
@@ -133,14 +190,25 @@ function requestBaseUrl(req) {
 }
 
 function installCommands(agent, token, baseUrl = publicBaseUrl) {
-  const wsUrl = baseUrl.replace(/^http/, 'ws') + '/ws/agent';
+  const settings = getSettings();
+  const wsBase = settings.agent_ws_base || baseUrl.replace(/^http/, 'ws');
+  const scriptBase = settings.script_base || baseUrl;
+  const wsUrl = `${wsBase}/ws/agent`;
   const image = `ghcr.io/${githubRepo.toLowerCase()}/netpilot-agent:latest`;
-  const script = `${baseUrl}/install-agent.sh`;
+  const script = `${scriptBase}/install-agent.sh`;
+  const accel = settings.github_accel_enabled === '1' ? String(settings.github_accel_domain || '').trim() : '';
+  const environment = [
+    accel ? `NETPILOT_GITHUB_ACCEL=${shellQuote(accel.endsWith('/') ? accel : `${accel}/`)}` : '',
+    `NETPILOT_SERVER=${shellQuote(wsUrl)}`,
+    `NETPILOT_TOKEN=${shellQuote(token)}`,
+    `NETPILOT_AGENT_ID=${shellQuote(agent.id)}`,
+    `NETPILOT_AGENT_NAME=${shellQuote(agent.name)}`
+  ].filter(Boolean).join(' ');
   return {
     token,
-    docker: `docker run -d --name netpilot-agent --restart unless-stopped \\\n  -e NETPILOT_SERVER=${wsUrl} \\\n  -e NETPILOT_TOKEN=${token} \\\n  -e NETPILOT_AGENT_ID=${agent.id} \\\n  -e NETPILOT_AGENT_NAME="${agent.name}" ${image}`,
-    script: `curl -fsSL ${script} | NETPILOT_SERVER=${wsUrl} NETPILOT_TOKEN=${token} NETPILOT_AGENT_ID=${agent.id} NETPILOT_AGENT_NAME="${agent.name}" sh`,
-    binary: `NETPILOT_SERVER=${wsUrl} NETPILOT_TOKEN=${token} NETPILOT_AGENT_ID=${agent.id} NETPILOT_AGENT_NAME="${agent.name}" ./netpilot-agent`
+    docker: `docker run -d --name netpilot-agent --restart unless-stopped \\\n  -e NETPILOT_SERVER=${shellQuote(wsUrl)} \\\n  -e NETPILOT_TOKEN=${shellQuote(token)} \\\n  -e NETPILOT_AGENT_ID=${shellQuote(agent.id)} \\\n  -e NETPILOT_AGENT_NAME=${shellQuote(agent.name)} ${shellQuote(image)}`,
+    script: `curl -fsSL ${shellQuote(script)} | env ${environment} sh`,
+    binary: `${environment} ./netpilot-agent`
   };
 }
 
@@ -292,6 +360,52 @@ async function handleApi(req, res, pathname) {
   }
   if (req.method === 'GET' && pathname === '/api/me') return json(res, 200, { user: user ? userView(user) : null });
   requireUser(user);
+  if (req.method === 'GET' && pathname === '/api/system/version') {
+    const refreshRequested = new URL(req.url, 'http://localhost').searchParams.get('refresh') === '1';
+    if (refreshRequested && user.id === 1) latestReleaseCache.checkedAt = 0;
+    const latest = await fetchLatestRelease();
+    const latestVersion = latest?.tag ? latest.tag.replace(/^v/, '') : null;
+    return json(res, 200, {
+      current: currentVersion,
+      latest: latestVersion,
+      updateAvailable: latestVersion ? compareVersions(latestVersion, currentVersion) > 0 : null,
+      releaseUrl: latest?.url || '',
+      checkedAt: latestReleaseCache.checkedAt ? new Date(latestReleaseCache.checkedAt).toISOString() : null
+    });
+  }
+  if (pathname === '/api/settings') {
+    if (user.id !== 1) return json(res, 403, { error: '只有系统管理员（uid=1）可以访问系统设置' });
+    if (req.method === 'GET') {
+      const settings = getSettings();
+      return json(res, 200, {
+        settings: {
+          agentWsBase: settings.agent_ws_base || '',
+          scriptBase: settings.script_base || '',
+          githubAccelEnabled: settings.github_accel_enabled === '1',
+          githubAccelDomain: settings.github_accel_domain || ''
+        }
+      });
+    }
+    if (req.method === 'PUT') {
+      const body = await bodyJson(req);
+      const agentWsBase = normalizeBaseUrl(body.agentWsBase, ['ws', 'wss']);
+      const scriptBase = normalizeBaseUrl(body.scriptBase, ['http', 'https']);
+      const githubAccelDomain = normalizeBaseUrl(body.githubAccelDomain, ['http', 'https']);
+      if (agentWsBase === null) return json(res, 400, { error: 'WS 连接地址格式无效，示例：wss://iperf.example.com 或 ws://1.2.3.4:8080' });
+      if (scriptBase === null) return json(res, 400, { error: '脚本拉取地址格式无效，示例：https://iperf.example.com 或 http://1.2.3.4:8080' });
+      if (githubAccelDomain === null) return json(res, 400, { error: 'GitHub 加速域名格式无效，示例：https://ghproxy.net' });
+      const enabled = Boolean(body.githubAccelEnabled);
+      if (enabled && !githubAccelDomain) return json(res, 400, { error: '启用 GitHub 加速时必须填写加速域名' });
+      setSetting('agent_ws_base', agentWsBase);
+      setSetting('script_base', scriptBase);
+      setSetting('github_accel_enabled', enabled ? '1' : '0');
+      setSetting('github_accel_domain', githubAccelDomain);
+      latestReleaseCache.checkedAt = 0;
+      audit(user.id, 'settings.update', 'settings', { agentWsBase, scriptBase, githubAccelEnabled: enabled, githubAccelDomain });
+      return json(res, 200, { ok: true });
+    }
+    return json(res, 405, { error: 'Method not allowed' });
+  }
   if (req.method === 'GET' && pathname === '/api/agents') {
     const rows = user.role === 'admin' ? all('SELECT * FROM agents ORDER BY name') : all('SELECT a.* FROM agents a JOIN user_agent_permissions p ON p.agent_id = a.id WHERE p.user_id = ? ORDER BY a.name', user.id);
     return json(res, 200, { agents: rows.map(agentView) });

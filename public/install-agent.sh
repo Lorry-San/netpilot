@@ -6,6 +6,8 @@ SERVER="${NETPILOT_SERVER:-}"
 TOKEN="${NETPILOT_TOKEN:-}"
 AGENT_ID="${NETPILOT_AGENT_ID:-}"
 AGENT_NAME="${NETPILOT_AGENT_NAME:-}"
+ACCEL="${NETPILOT_GITHUB_ACCEL:-}"
+if [ -n "$ACCEL" ] && [ "${ACCEL%/}" = "$ACCEL" ]; then ACCEL="${ACCEL}/"; fi
 
 if [ "$(id -u)" -ne 0 ]; then
   echo "This installer must run as root." >&2
@@ -46,7 +48,7 @@ escape_value() {
 }
 
 install_iperf3
-DOWNLOAD_URL="https://github.com/${REPO}/releases/latest/download/netpilot-agent-linux-${ARCH}"
+DOWNLOAD_URL="${ACCEL}https://github.com/${REPO}/releases/latest/download/netpilot-agent-linux-${ARCH}"
 download "$DOWNLOAD_URL" /usr/local/bin/netpilot-agent.tmp
 chmod 0755 /usr/local/bin/netpilot-agent.tmp
 mv /usr/local/bin/netpilot-agent.tmp /usr/local/bin/netpilot-agent

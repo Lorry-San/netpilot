@@ -15,6 +15,9 @@ NetPilot is a self-hosted web control plane for distributed `iperf3` tests. A No
 - SQLite storage with WAL mode
 - Docker installation command for the Alpine `linux/amd64` Agent image
 - One-line Linux installer that detects `x86-64` or `arm64`
+- System settings for Agent WS address, installer address and optional GitHub download acceleration
+- Web version detection against the latest GitHub Release
+- In-place server update script for Docker Compose deployments
 - GitHub Actions builds both Agent binaries, creates release assets and publishes the amd64 Agent image to GHCR
 
 ## Architecture
@@ -86,7 +89,7 @@ SQLite data is stored in the `netpilot-data` volume.
 
 The generated token is shown once. Only its SHA-256 digest is stored by the server.
 
-Install commands use the scheme and host of the admin's own HTTP request (including `X-Forwarded-Proto` behind a reverse proxy). `PUBLIC_BASE_URL` is only a fallback when the request host is missing or invalid.
+By default, install commands use the scheme and host of the admin's own HTTP request (including `X-Forwarded-Proto` behind a reverse proxy). `PUBLIC_BASE_URL` is only a fallback when the request host is missing or invalid. The `uid=1` system administrator can override the Agent WebSocket address and installer script address under **System Settings**. This is useful when the Web UI and WebSocket endpoint use different domains or IP addresses.
 
 ### Docker Agent
 
@@ -121,8 +124,38 @@ An online or busy Agent cannot generate a new installation token, cannot be rein
 | Add, reinstall or remove Agents | Yes | No |
 | Manage users | Yes | No |
 | Change roles | Yes | No |
+| Change system connection/download settings | `uid=1` only | No |
 
 The system administrator is always `uid=1`. API requests that attempt to delete, disable or demote `uid=1` are rejected.
+
+## System settings and version detection
+
+Only the immutable `uid=1` system administrator can open **System Settings** or use `/api/settings`. The page controls:
+
+- Agent WebSocket base URL, such as `wss://iperf.example.com` or `ws://192.0.2.10:8080`
+- Installer script base URL, such as `https://iperf.example.com`
+- Optional GitHub acceleration prefix used by the one-line installer and version checker
+
+Values are stored in SQLite. Leave the WS and installer fields empty to derive them from the domain used to access the Web UI. New values apply to installation commands generated after saving; existing Agent services are not rewritten automatically.
+
+The top bar displays the running version and reports when a newer GitHub Release exists. Release checks are cached for 30 minutes and failures do not interrupt normal Web UI operation.
+
+## Updating a deployment
+
+For a Git-based Docker Compose installation at `/opt/netpilot`, run:
+
+```bash
+cd /opt/netpilot
+sh scripts/update.sh
+```
+
+The script fetches the configured branch (default `main`), resets the checkout to that upstream branch, rebuilds the server image, restarts the Compose services and removes unused images. Set `NETPILOT_DIR` or `NETPILOT_BRANCH` when your checkout or branch differs:
+
+```bash
+NETPILOT_DIR=/srv/netpilot NETPILOT_BRANCH=main sh /srv/netpilot/scripts/update.sh
+```
+
+The SQLite Docker volume and local `.env` file are preserved. Commit or back up local source changes before updating because the working tree is replaced with the selected upstream branch.
 
 ## Password and session security
 

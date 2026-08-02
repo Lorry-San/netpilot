@@ -1,4 +1,5 @@
 import { createServer } from 'node:http';
+import { randomInt } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
 import { extname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -445,6 +446,46 @@ function taskView(task) {
   };
 }
 
+export function createTest(user, body = {}) {
+  const agent = get('SELECT * FROM agents WHERE id = ? AND deleted_at IS NULL', String(body.agentId || ''));
+  if (!agent || !canUseAgent(user, agent.id)) throw Object.assign(new Error('无权使用该 Agent'), { status: 403 });
+  if (agent.status === 'offline') throw Object.assign(new Error('Agent 当前离线'), { status: 409 });
+  if (agent.status === 'busy') throw Object.assign(new Error('Agent 正在执行其他任务'), { status: 409 });
+  const target = String(body.target || '').trim();
+  const portValue = Number(body.port || 5201);
+  const duration = Number(body.duration || 15);
+  const parallel = Number(body.parallel || 1);
+  const protocol = body.protocol === 'udp' ? 'udp' : 'tcp';
+  if (!target || !Number.isInteger(portValue) || portValue < 1 || portValue > 65535 || !Number.isInteger(duration) || duration < 1 || duration > 3600 || !Number.isInteger(parallel) || parallel < 1 || parallel > 32) throw Object.assign(new Error('测试参数无效'), { status: 400 });
+  const id = `test_${randomToken(12)}`;
+  const created = now();
+  run('INSERT INTO tests (id, user_id, agent_id, target, port, protocol, reverse, duration, parallel, bandwidth, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, \'running\', ?)', id, user.id, agent.id, target, portValue, protocol, body.reverse ? 1 : 0, duration, parallel, body.bandwidth || null, created);
+  run('UPDATE agents SET status = \'busy\', updated_at = ? WHERE id = ?', now(), agent.id);
+  const sent = sendAgent(agent.id, { type: 'task.start', taskId: id, payload: { target, port: portValue, protocol, reverse: Boolean(body.reverse), duration, parallel, bandwidth: body.bandwidth || '' } });
+  if (!sent) {
+    run('UPDATE tests SET status = \'failed\', finished_at = ?, result_json = ? WHERE id = ?', now(), JSON.stringify({ error: 'Agent disconnected before task dispatch' }), id);
+    run('UPDATE agents SET status = \'offline\', updated_at = ? WHERE id = ?', now(), agent.id);
+    throw Object.assign(new Error('Agent 已断开，任务未下发'), { status: 409 });
+  }
+  return get('SELECT * FROM tests WHERE id = ?', id);
+}
+
+const taskCompletionHooks = new Set();
+export function onTaskComplete(hook) {
+  taskCompletionHooks.add(hook);
+  return () => taskCompletionHooks.delete(hook);
+}
+
+function emitTaskComplete(taskId) {
+  const task = get('SELECT * FROM tests WHERE id = ?', taskId);
+  if (!task) return;
+  const view = taskView(task);
+  for (const hook of taskCompletionHooks) {
+    try { Promise.resolve(hook(task, view)).catch((error) => console.error('[netpilot] task completion hook failed:', error)); }
+    catch (error) { console.error('[netpilot] task completion hook failed:', error); }
+  }
+}
+
 function handleAgentMessage(socket, agentId, message) {
   const type = message.type;
   if (type === 'agent.heartbeat') {
@@ -483,10 +524,12 @@ function handleAgentMessage(socket, agentId, message) {
     run('UPDATE tests SET status = ?, finished_at = ?, result_json = ? WHERE id = ?', status, now(), JSON.stringify(message.payload || {}), taskId);
     run('UPDATE agents SET status = \'online\', updated_at = ? WHERE id = ?', now(), agentId);
     broadcastTask(task, { type, taskId, payload: { ...(message.payload || {}), status } });
+    emitTaskComplete(taskId);
   } else if (type === 'task.error') {
     run('UPDATE tests SET status = \'failed\', finished_at = ?, result_json = ? WHERE id = ?', now(), JSON.stringify(message.payload || {}), taskId);
     run('UPDATE agents SET status = \'online\', updated_at = ? WHERE id = ?', now(), agentId);
     broadcastTask(task, { type, taskId, payload: { ...(message.payload || {}), status: 'failed' } });
+    emitTaskComplete(taskId);
   }
 }
 
@@ -522,7 +565,10 @@ function handleAgentSocket(socket, req) {
     agentConnections.delete(agentId);
     run('UPDATE agents SET status = \'offline\', updated_at = ? WHERE id = ?', now(), agentId);
     const active = get('SELECT id FROM tests WHERE agent_id = ? AND status IN (\'queued\', \'running\')', agentId);
-    if (active) run('UPDATE tests SET status = \'failed\', finished_at = ?, result_json = ? WHERE id = ?', now(), JSON.stringify({ error: 'Agent disconnected' }), active.id);
+    if (active) {
+      run('UPDATE tests SET status = \'failed\', finished_at = ?, result_json = ? WHERE id = ?', now(), JSON.stringify({ error: 'Agent disconnected' }), active.id);
+      emitTaskComplete(active.id);
+    }
   });
 }
 
@@ -552,7 +598,13 @@ async function handleApi(req, res, pathname) {
     if (sessionToken) run('DELETE FROM sessions WHERE token_hash = ?', hashToken(sessionToken));
     return json(res, 200, { ok: true }, { 'set-cookie': cookie('netpilot_session', '', 0) });
   }
-  if (req.method === 'GET' && pathname === '/api/me') return json(res, 200, { user: user ? userView(user) : null });
+  if (req.method === 'GET' && pathname === '/api/me') {
+    if (!user) return json(res, 200, { user: null });
+    const binding = get('SELECT telegram_id AS telegramId, telegram_username AS telegramUsername, bound_at AS boundAt FROM telegram_users WHERE user_id = ?', user.id);
+    const view = userView(user);
+    view.telegram = binding ? { telegramId: String(binding.telegramId), username: binding.telegramUsername, boundAt: binding.boundAt } : null;
+    return json(res, 200, { user: view });
+  }
   requireUser(user);
   if (req.method === 'PATCH' && pathname === '/api/me') {
     const body = await bodyJson(req);
@@ -592,7 +644,8 @@ async function handleApi(req, res, pathname) {
           agentWsBase: settings.agent_ws_base || '',
           scriptBase: settings.script_base || '',
           githubAccelEnabled: settings.github_accel_enabled === '1',
-          githubAccelDomain: settings.github_accel_domain || ''
+          githubAccelDomain: settings.github_accel_domain || '',
+          telegramBotToken: settings.telegram_bot_token || ''
         }
       });
     }
@@ -606,12 +659,16 @@ async function handleApi(req, res, pathname) {
       if (githubAccelDomain === null) return json(res, 400, { error: 'GitHub 加速域名格式无效，示例：https://ghproxy.net' });
       const enabled = Boolean(body.githubAccelEnabled);
       if (enabled && !githubAccelDomain) return json(res, 400, { error: '启用 GitHub 加速时必须填写加速域名' });
+      const telegramBotToken = String(body.telegramBotToken || '').trim();
+      if (telegramBotToken && !/^\d{6,12}:[A-Za-z0-9_-]{30,60}$/.test(telegramBotToken)) return json(res, 400, { error: 'Telegram Bot Token 格式无效' });
       setSetting('agent_ws_base', agentWsBase);
       setSetting('script_base', scriptBase);
       setSetting('github_accel_enabled', enabled ? '1' : '0');
       setSetting('github_accel_domain', githubAccelDomain);
+      setSetting('telegram_bot_token', telegramBotToken);
       latestReleaseCache.checkedAt = 0;
-      audit(user.id, 'settings.update', 'settings', { agentWsBase, scriptBase, githubAccelEnabled: enabled, githubAccelDomain });
+      if (typeof globalThis.netpilotTelegramReload === 'function') globalThis.netpilotTelegramReload();
+      audit(user.id, 'settings.update', 'settings', { agentWsBase, scriptBase, githubAccelEnabled: enabled, githubAccelDomain, telegramBotToken: telegramBotToken ? 'updated' : 'cleared' });
       return json(res, 200, { ok: true });
     }
     return json(res, 405, { error: 'Method not allowed' });
@@ -628,28 +685,13 @@ async function handleApi(req, res, pathname) {
   }
   if (req.method === 'POST' && pathname === '/api/tests') {
     const body = await bodyJson(req);
-    const agent = get('SELECT * FROM agents WHERE id = ? AND deleted_at IS NULL', String(body.agentId || ''));
-    if (!agent || !canUseAgent(user, agent.id)) return json(res, 403, { error: '无权使用该 Agent' });
-    if (agent.status === 'offline') return json(res, 409, { error: 'Agent 当前离线' });
-    if (agent.status === 'busy') return json(res, 409, { error: 'Agent 正在执行其他任务' });
-    const target = String(body.target || '').trim();
-    const portValue = Number(body.port || 5201);
-    const duration = Number(body.duration || 15);
-    const parallel = Number(body.parallel || 1);
-    const protocol = body.protocol === 'udp' ? 'udp' : 'tcp';
-    if (!target || !Number.isInteger(portValue) || portValue < 1 || portValue > 65535 || !Number.isInteger(duration) || duration < 1 || duration > 3600 || !Number.isInteger(parallel) || parallel < 1 || parallel > 32) return json(res, 400, { error: '测试参数无效' });
-    const id = `test_${randomToken(12)}`;
-    const created = now();
-    run('INSERT INTO tests (id, user_id, agent_id, target, port, protocol, reverse, duration, parallel, bandwidth, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, \'running\', ?)', id, user.id, agent.id, target, portValue, protocol, body.reverse ? 1 : 0, duration, parallel, body.bandwidth || null, created);
-    run('UPDATE agents SET status = \'busy\', updated_at = ? WHERE id = ?', now(), agent.id);
-    const sent = sendAgent(agent.id, { type: 'task.start', taskId: id, payload: { target, port: portValue, protocol, reverse: Boolean(body.reverse), duration, parallel, bandwidth: body.bandwidth || '' } });
-    if (!sent) {
-      run('UPDATE tests SET status = \'failed\', finished_at = ?, result_json = ? WHERE id = ?', now(), JSON.stringify({ error: 'Agent disconnected before task dispatch' }), id);
-      run('UPDATE agents SET status = \'offline\', updated_at = ? WHERE id = ?', now(), agent.id);
-      return json(res, 409, { error: 'Agent 已断开，任务未下发' });
+    try {
+      const test = createTest(user, body);
+      audit(user.id, 'test.create', test.id, { agentId: test.agent_id, target: test.target, protocol: test.protocol });
+      return json(res, 201, { test: taskView(test) });
+    } catch (error) {
+      return json(res, error.status || 500, { error: error.status ? error.message : 'Internal server error' });
     }
-    audit(user.id, 'test.create', id, { agentId: agent.id, target, protocol });
-    return json(res, 201, { test: taskView(get('SELECT * FROM tests WHERE id = ?', id)) });
   }
   const testCancel = pathname.match(/^\/api\/tests\/([^/]+)\/cancel$/);
   if (req.method === 'POST' && testCancel) {
@@ -659,6 +701,7 @@ async function handleApi(req, res, pathname) {
     sendAgent(task.agent_id, { type: 'task.cancel', taskId: task.id });
     run('UPDATE tests SET status = \'cancelled\', finished_at = ? WHERE id = ?', now(), task.id);
     run('UPDATE agents SET status = \'online\', updated_at = ? WHERE id = ?', now(), task.agent_id);
+    emitTaskComplete(task.id);
     return json(res, 200, { test: taskView(get('SELECT * FROM tests WHERE id = ?', task.id)) });
   }
   if (req.method === 'GET' && pathname === '/api/users') {
@@ -729,6 +772,49 @@ async function handleApi(req, res, pathname) {
     run('DELETE FROM users WHERE id = ?', targetId);
     audit(user.id, 'user.delete', `user:${targetId}`);
     return json(res, 200, { ok: true });
+  }
+  if (req.method === 'POST' && pathname === '/api/telegram/bind-code') {
+    let code;
+    do { code = String(randomInt(100000, 1000000)); } while (get('SELECT 1 FROM telegram_bind_codes WHERE code = ?', code));
+    run('DELETE FROM telegram_bind_codes WHERE user_id = ? OR expires_at <= ?', user.id, now());
+    run('INSERT INTO telegram_bind_codes (code, user_id, expires_at, created_at) VALUES (?, ?, ?, ?)', code, user.id, new Date(Date.now() + 10 * 60 * 1000).toISOString(), now());
+    return json(res, 200, { code, expiresInSeconds: 600 });
+  }
+  if (req.method === 'DELETE' && pathname === '/api/telegram/bind') {
+    run('DELETE FROM telegram_users WHERE user_id = ?', user.id);
+    audit(user.id, 'telegram.unbind', `user:${user.id}`);
+    return json(res, 200, { ok: true });
+  }
+  if (req.method === 'GET' && pathname === '/api/admin/telegram/groups') {
+    requireAdmin(user);
+    const groups = all(`SELECT g.chat_id AS chatId, g.title, g.owner_user_id AS ownerUserId, g.mode, g.updated_at AS updatedAt, u.display_name AS ownerName
+                        FROM telegram_groups g LEFT JOIN users u ON u.id = g.owner_user_id ORDER BY g.updated_at DESC`);
+    return json(res, 200, { groups });
+  }
+  if (req.method === 'POST' && pathname === '/api/admin/telegram/groups/mode') {
+    requireAdmin(user);
+    const body = await bodyJson(req);
+    const mode = body.mode === 'all_members' ? 'all_members' : body.mode === 'members_only' ? 'members_only' : null;
+    if (!mode) return json(res, 400, { error: '群组模式无效' });
+    const chatIds = Array.isArray(body.chatIds) ? [...new Set(body.chatIds.map((value) => String(value)))] : [];
+    if (!chatIds.length) return json(res, 400, { error: '请选择至少一个群组' });
+    const timestamp = now();
+    let updated = 0;
+    for (const chatId of chatIds) {
+      updated += Number(run('UPDATE telegram_groups SET mode = ?, updated_at = ? WHERE chat_id = ?', mode, timestamp, chatId).changes);
+    }
+    audit(user.id, 'telegram.groups.mode', 'telegram_groups', { chatIds, mode, updated });
+    return json(res, 200, { ok: true, updated });
+  }
+  if (req.method === 'DELETE' && pathname === '/api/admin/telegram/groups') {
+    requireAdmin(user);
+    const body = await bodyJson(req);
+    const chatIds = Array.isArray(body.chatIds) ? [...new Set(body.chatIds.map((value) => String(value)))] : [];
+    if (!chatIds.length) return json(res, 400, { error: '请选择至少一个群组' });
+    let removed = 0;
+    for (const chatId of chatIds) removed += Number(run('DELETE FROM telegram_groups WHERE chat_id = ?', chatId).changes);
+    audit(user.id, 'telegram.groups.remove', 'telegram_groups', { chatIds, removed });
+    return json(res, 200, { ok: true, removed });
   }
   if (req.method === 'POST' && pathname === '/api/admin/agents') {
     requireAdmin(user);
@@ -820,5 +906,20 @@ server.on('upgrade', (req, socket, head) => {
   else if (pathname === '/ws/ui') uiWss.handleUpgrade(req, socket, head, (ws) => uiWss.emit('connection', ws, req));
   else socket.destroy();
 });
+
+globalThis.netpilotServerApi = {
+  db: { get, all, run, now },
+  randomToken,
+  hashToken,
+  getSettings,
+  createTest,
+  onTaskComplete,
+  audit
+};
+
+const isPrimaryModule = process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url);
+if (isPrimaryModule) {
+  import('./telegram.js').then((module) => module.startTelegramBot()).catch((error) => console.error('[netpilot] telegram bot failed to start:', error));
+}
 
 server.listen(port, () => console.log(`[netpilot] listening on ${publicBaseUrl}`));

@@ -147,6 +147,21 @@ dialog form { display: grid; gap: 14px; padding: 16px; }
 .agent-choice:hover { border-color: var(--accent); }
 .agent-choice input { width: auto; min-height: 0; accent-color: var(--accent); }
 .empty-choice { margin: 0; color: var(--muted); }
+.telegram-groups-panel { margin-top: 18px; }
+.telegram-group-controls { display: grid; padding: 12px; }
+.telegram-group-controls .picker-toolbar { padding: 0 0 10px; }
+.telegram-group-choice-box { max-height: 260px; overflow: auto; border: 1px solid var(--border); border-radius: 6px; background: var(--surface); }
+.telegram-group-choice { display: flex; align-items: center; gap: 9px; min-height: 42px; padding: 8px 10px; border-bottom: 1px solid var(--border); cursor: pointer; }
+.telegram-group-choice:last-child { border-bottom: 0; }
+.telegram-group-choice:hover { background: var(--surface-soft); }
+.telegram-group-choice input { width: auto; min-height: 0; accent-color: var(--accent); }
+.telegram-group-choice-box .empty-choice { padding: 14px; }
+.telegram-group-batch-actions { display: flex; flex-wrap: wrap; gap: 8px; padding-top: 10px; }
+.danger-button { color: light-dark(#a32020, #ff8f8f); }
+.telegram-binding { display: grid; gap: 8px; padding: 10px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface-soft); }
+.bind-code-row { display: grid; gap: 5px; color: var(--muted); font-size: .84rem; }
+.bind-code-row > code { width: fit-content; padding: 5px 8px; color: var(--text); border: 1px solid var(--border); border-radius: 4px; background: var(--surface); font-size: 1rem; }
+.telegram-binding-actions { display: flex; gap: 8px; }
 #toast { position: fixed; right: 18px; bottom: 18px; z-index: 20; max-width: min(380px, calc(100% - 36px)); padding: 10px 14px; border-radius: 5px; color: #fff; background: #162229; opacity: 0; transform: translateY(8px); pointer-events: none; transition: .18s ease; }
 #toast.show { opacity: 1; transform: translateY(0); }
 @media (max-width: 900px) {

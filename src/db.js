@@ -89,6 +89,29 @@ db.exec(`
     value TEXT NOT NULL,
     updated_at TEXT NOT NULL
   );
+  CREATE TABLE IF NOT EXISTS telegram_users (
+    telegram_id INTEGER PRIMARY KEY,
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    telegram_username TEXT NOT NULL DEFAULT '',
+    chat_id INTEGER NOT NULL DEFAULT 0,
+    bound_at TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS telegram_users_user_idx ON telegram_users(user_id);
+  CREATE UNIQUE INDEX IF NOT EXISTS telegram_users_one_account_idx ON telegram_users(user_id);
+  CREATE TABLE IF NOT EXISTS telegram_groups (
+    chat_id INTEGER PRIMARY KEY,
+    title TEXT NOT NULL DEFAULT '',
+    owner_user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    mode TEXT NOT NULL DEFAULT 'members_only' CHECK (mode IN ('members_only', 'all_members')),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  );
+  CREATE TABLE IF NOT EXISTS telegram_bind_codes (
+    code TEXT PRIMARY KEY,
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    expires_at TEXT NOT NULL,
+    created_at TEXT NOT NULL
+  );
   CREATE TABLE IF NOT EXISTS audit_logs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id INTEGER REFERENCES users(id),

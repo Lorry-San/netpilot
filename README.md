@@ -18,6 +18,8 @@ NetPilot is a self-hosted web control plane for distributed `iperf3` tests. A No
 - Agent auto-update requests for online native Agents plus manual in-place updater commands, with checksum verification and rollback
 - System settings for Agent WS address, installer address and optional GitHub download acceleration
 - Web version detection against the latest GitHub Release
+- Telegram Bot tests with account binding, authenticated Agent selection, progress updates, raw output and speed charts
+- Administrator-managed Telegram group access modes
 - In-place server update script for Docker Compose deployments
 - GitHub Actions builds both Agent binaries, creates release assets and publishes the amd64 Agent image to GHCR
 
@@ -33,6 +35,8 @@ Node.js control plane ---- SQLite
    | WSS + Agent token
    v
 Go Agent ---- iperf3
+
+Telegram Bot ---- long polling ---- Node.js control plane
 ```
 
 Agents only create outbound WSS connections. They do not expose an inbound management port.
@@ -149,9 +153,31 @@ The standalone endpoint is `/update-agent.sh`. Normally use the command generate
 | Add, reinstall or remove Agents | Yes | No |
 | Manage users | Yes | No |
 | Change roles | Yes | No |
+| Configure Telegram groups | Yes | No |
 | Change system connection/download settings | `uid=1` only | No |
 
 The system administrator is always `uid=1`. API requests that attempt to delete, disable or demote `uid=1` are rejected.
+
+## Telegram Bot
+
+The `uid=1` system administrator can paste a BotFather token under **System Settings**. NetPilot uses Telegram Bot API long polling from the Node.js process, so no public webhook endpoint is required. Clearing the token stops the Bot.
+
+Each user binds one Telegram account from **Account Settings**:
+
+1. Select **Generate binding code** in the Web UI.
+2. Send `/bind <code>` to the Bot within 10 minutes.
+3. Use `/agents` or `/iperf <ip> <port> [threads] [duration]` in a private chat or an allowed group.
+
+`/iperf` defaults to one stream and 10 seconds. The Bot presents the online Agents available to the bound NetPilot user as an authenticated, paginated multi-select keyboard. Callback buttons are tied to the requesting Telegram ID and the binding is checked again on every click. Each selected Agent gets its own normal NetPilot test, so Web Agent permissions and busy/offline checks still apply.
+
+The final response includes a summary, Telegram's expandable raw-output block and a PNG speed/time chart with axes and units. Long raw output is tail-truncated to stay within Telegram message limits.
+
+Sending a command from a group registers that group in **User Management → Telegram Groups**. Administrators can select several groups in one continuous list and set them to:
+
+- **Owner only**: only the bound user who registered the group can use the Bot there.
+- **All members**: any NetPilot-bound Telegram user in that group can use the Bot with their own Agent permissions.
+
+Administrators can register any number of groups. A regular user can register one group. Only NetPilot administrators can batch-change group modes or remove groups from the Web UI.
 
 ## System settings and version detection
 
@@ -160,6 +186,7 @@ Only the immutable `uid=1` system administrator can open **System Settings** or 
 - Agent WebSocket base URL, such as `wss://iperf.example.com` or `ws://192.0.2.10:8080`
 - Agent script base URL for installation and updates, such as `https://iperf.example.com`
 - Optional GitHub acceleration prefix used by Agent installation, Agent updates and version checks
+- Telegram Bot token; only `uid=1` can view or change it
 
 Values are stored in SQLite. Leave the WS and installer fields empty to derive them from the domain used to access the Web UI. New values apply to installation commands generated after saving; existing Agent services are not rewritten automatically.
 

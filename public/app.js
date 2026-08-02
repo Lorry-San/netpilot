@@ -1,4 +1,4 @@
-const state = { user: null, agents: [], users: [], tests: [], activeTestId: null, pollTimer: null, settingsLoaded: false, liveSocket: null };
+const state = { user: null, agents: [], users: [], tests: [], telegramGroups: [], activeTestId: null, pollTimer: null, settingsLoaded: false, liveSocket: null };
 const $ = (selector) => document.querySelector(selector);
 const $$ = (selector) => [...document.querySelectorAll(selector)];
 
@@ -173,7 +173,7 @@ async function showApp(user) {
   setView('tests');
   try {
     await loadAgents();
-    await Promise.all([loadTests(), user.role === 'admin' ? loadUsers() : Promise.resolve()]);
+    await Promise.all([loadTests(), user.role === 'admin' ? loadUsers() : Promise.resolve(), user.role === 'admin' ? loadTelegramGroups() : Promise.resolve()]);
   } catch (error) {
     console.error(error);
     toast(`数据加载失败：${error.message}`);
@@ -231,6 +231,7 @@ async function loadSettings() {
   $('#setting-script-base').value = result.settings.scriptBase;
   $('#setting-github-accel-enabled').checked = result.settings.githubAccelEnabled;
   $('#setting-github-accel-domain').value = result.settings.githubAccelDomain;
+  $('#setting-telegram-token').value = result.settings.telegramBotToken;
   state.settingsLoaded = true;
   syncAccelField();
 }
@@ -529,6 +530,52 @@ async function loadUsers() {
   renderUsers();
 }
 
+function selectedTelegramGroupIds() {
+  return [...$('#telegram-group-choices').querySelectorAll('input[type="checkbox"]:checked')].map((input) => input.value);
+}
+
+function renderTelegramGroups() {
+  const container = $('#telegram-group-choices');
+  const selected = new Set(selectedTelegramGroupIds());
+  clear(container);
+  if (!state.telegramGroups.length) {
+    const empty = document.createElement('p');
+    empty.className = 'empty-choice';
+    empty.textContent = '暂无已登记群组。在群组中向 Bot 发送命令后会自动登记。';
+    container.appendChild(empty);
+    return;
+  }
+  for (const group of state.telegramGroups) {
+    const label = document.createElement('label');
+    label.className = 'telegram-group-choice';
+    const input = document.createElement('input');
+    input.type = 'checkbox';
+    input.value = String(group.chatId);
+    input.checked = selected.has(String(group.chatId));
+    const details = document.createElement('span');
+    details.textContent = `${group.title || group.chatId} · ${group.ownerName || `UID ${group.ownerUserId}`} · ${group.mode === 'all_members' ? '全员可用' : '仅群主可用'}`;
+    label.append(input, details);
+    container.appendChild(label);
+  }
+}
+
+async function loadTelegramGroups() {
+  if (state.user?.role !== 'admin') return;
+  const result = await api('/api/admin/telegram/groups');
+  state.telegramGroups = result.groups;
+  renderTelegramGroups();
+}
+
+async function updateTelegramGroups(method, payload) {
+  const chatIds = selectedTelegramGroupIds();
+  if (!chatIds.length) { toast('请先选择群组'); return; }
+  try {
+    await api('/api/admin/telegram/groups' + (method === 'DELETE' ? '' : '/mode'), { method, body: JSON.stringify({ chatIds, ...payload }) });
+    await loadTelegramGroups();
+    toast(method === 'DELETE' ? '群组已移除' : '群组模式已更新');
+  } catch (error) { toast(error.message); }
+}
+
 function syncAgentAccessRows() {
   $('#new-agent-access-row').hidden = $('#new-role').value === 'admin';
   $('#edit-agent-access-row').hidden = $('#edit-role').value === 'admin';
@@ -550,14 +597,23 @@ async function openEditUser(user) {
   $('#user-edit-dialog').showModal();
 }
 
-function openProfileDialog() {
+async function openProfileDialog() {
   closeAccountMenu();
+  try {
+    const result = await api('/api/me');
+    state.user = result.user;
+  } catch (error) { toast(error.message); return; }
   $('#profile-uid').textContent = state.user.id;
   $('#profile-username').textContent = state.user.username;
   $('#profile-display-name').value = state.user.displayName;
   $('#profile-current-password').value = '';
   $('#profile-new-password').value = '';
   $('#profile-confirm-password').value = '';
+  $('#telegram-bind-code-row').hidden = true;
+  const binding = state.user.telegram;
+  $('#profile-telegram-status').textContent = binding ? `已绑定 @${binding.username || binding.telegramId}` : '未绑定';
+  $('#generate-telegram-code').hidden = Boolean(binding);
+  $('#unbind-telegram').hidden = !binding;
   $('#profile-dialog').showModal();
 }
 
@@ -588,6 +644,26 @@ $('#account-button').addEventListener('click', (event) => {
 $('#open-profile').addEventListener('click', openProfileDialog);
 document.addEventListener('click', (event) => {
   if (!(event.target instanceof Element) || !event.target.closest('.account-shell')) closeAccountMenu();
+});
+
+$('#generate-telegram-code').addEventListener('click', async () => {
+  try {
+    const result = await api('/api/telegram/bind-code', { method: 'POST', body: '{}' });
+    $('#telegram-bind-code').textContent = result.code;
+    $('#telegram-bind-code-row').hidden = false;
+  } catch (error) { toast(error.message); }
+});
+
+$('#unbind-telegram').addEventListener('click', async () => {
+  if (!confirm('解除当前 Telegram 绑定？')) return;
+  try {
+    await api('/api/telegram/bind', { method: 'DELETE', body: '{}' });
+    state.user.telegram = null;
+    $('#profile-telegram-status').textContent = '未绑定';
+    $('#generate-telegram-code').hidden = false;
+    $('#unbind-telegram').hidden = true;
+    toast('Telegram 绑定已解除');
+  } catch (error) { toast(error.message); }
 });
 
 $('#profile-form').addEventListener('submit', async (event) => {
@@ -629,7 +705,8 @@ $('#settings-form').addEventListener('submit', async (event) => {
         agentWsBase: $('#setting-agent-ws').value,
         scriptBase: $('#setting-script-base').value,
         githubAccelEnabled: $('#setting-github-accel-enabled').checked,
-        githubAccelDomain: $('#setting-github-accel-domain').value
+        githubAccelDomain: $('#setting-github-accel-domain').value,
+        telegramBotToken: $('#setting-telegram-token').value
       })
     });
     await loadSettings();
@@ -638,6 +715,21 @@ $('#settings-form').addEventListener('submit', async (event) => {
   finally { saveButton.disabled = false; }
 });
 $('#refresh-version').addEventListener('click', () => loadVersion(true).catch((error) => toast(error.message)));
+
+$('#refresh-telegram-groups').addEventListener('click', () => loadTelegramGroups().catch((error) => toast(error.message)));
+$$('.telegram-group-action').forEach((node) => node.addEventListener('click', () => {
+  const inputs = $('#telegram-group-choices').querySelectorAll('input[type="checkbox"]');
+  for (const input of inputs) {
+    if (node.dataset.action === 'all') input.checked = true;
+    else if (node.dataset.action === 'clear') input.checked = false;
+    else input.checked = !input.checked;
+  }
+}));
+$('#telegram-groups-owner-only').addEventListener('click', () => updateTelegramGroups('POST', { mode: 'members_only' }));
+$('#telegram-groups-all-members').addEventListener('click', () => updateTelegramGroups('POST', { mode: 'all_members' }));
+$('#telegram-groups-remove').addEventListener('click', () => {
+  if (selectedTelegramGroupIds().length && confirm('从 NetPilot 移除所选群组？')) updateTelegramGroups('DELETE', {});
+});
 
 $('#test-agent').addEventListener('change', updateSelectedAgent);
 $$('input[name="protocol"]').forEach((input) => input.addEventListener('change', () => { $('#bandwidth-row').hidden = input.value !== 'udp' || !input.checked; }));

@@ -66,6 +66,10 @@ test('static assets and installer script are served', async (t) => {
   assert.match(indexHtml, /id="setting-agent-ws"/);
   assert.match(indexHtml, /id="setting-script-base"/);
   assert.match(indexHtml, /id="setting-github-accel-enabled"/);
+  assert.match(indexHtml, /id="setting-telegram-token"/);
+  assert.match(indexHtml, /id="generate-telegram-code"/);
+  assert.match(indexHtml, /id="telegram-group-choices"/);
+  assert.match(indexHtml, /id="telegram-groups-all-members"/);
   assert.match(indexHtml, /id="current-version"/);
   assert.match(indexHtml, /id="update-agent-panel"/);
   assert.match(indexHtml, /id="agent-update-command"/);
@@ -89,6 +93,8 @@ test('static assets and installer script are served', async (t) => {
   assert.match(appScript, /先手动更新/);
   assert.match(appScript, /\/update`/);
   assert.match(appScript, /selectedAgentIds/);
+  assert.match(appScript, /\/api\/telegram\/bind-code/);
+  assert.match(appScript, /\/api\/admin\/telegram\/groups/);
 
   const installer = await fetch(`${base}/install-agent.sh`);
   assert.equal(installer.status, 200);

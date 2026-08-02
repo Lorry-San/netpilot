@@ -100,7 +100,6 @@ test('security invariants, roles and Agent installation lock', async (t) => {
     env: { ...process.env, PORT: String(port), PUBLIC_BASE_URL: base, DB_PATH: dbPath, ADMIN_PASSWORD: 'Integration-Test-Password-2026', NETPILOT_DISABLE_TELEGRAM: '1' },
     stdio: ['ignore', 'pipe', 'pipe']
   });
-  child.stderr.on('data', (chunk) => process.stderr.write(`[server-stderr] ${chunk}`));
   let database;
   t.after(async () => {
     if (database) database.close();
@@ -311,7 +310,7 @@ test('security invariants, roles and Agent installation lock', async (t) => {
 
   const version = await request(base, '/api/system/version', {}, session);
   assert.equal(version.response.status, 200);
-  assert.equal(version.body.current, '0.1.11');
+  assert.equal(version.body.current, '0.1.12');
   assert.ok(Object.hasOwn(version.body, 'updateAvailable'));
 
   socket.close();

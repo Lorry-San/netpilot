@@ -40,6 +40,7 @@ db.exec(`
     upload_percent REAL NOT NULL DEFAULT 0,
     download_percent REAL NOT NULL DEFAULT 0,
     last_seen_at TEXT,
+    deleted_at TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
   );
@@ -97,6 +98,11 @@ db.exec(`
     created_at TEXT NOT NULL
   );
 `);
+
+const agentColumns = db.prepare('PRAGMA table_info(agents)').all();
+if (!agentColumns.some((column) => column.name === 'deleted_at')) {
+  db.exec('ALTER TABLE agents ADD COLUMN deleted_at TEXT;');
+}
 
 export function now() {
   return new Date().toISOString();

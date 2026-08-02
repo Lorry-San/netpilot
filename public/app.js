@@ -59,7 +59,7 @@ function percentText(value) {
 function appendOutput(line) {
   const output = $('#raw-output');
   if (output.dataset.streaming !== '1') { output.textContent = ''; output.dataset.streaming = '1'; }
-  output.textContent += `${line}\n`;
+  output.append(document.createTextNode(`${line}\n`));
   output.scrollTop = output.scrollHeight;
 }
 
@@ -134,7 +134,7 @@ async function showApp(user) {
   clearInterval(state.pollTimer);
   state.pollTimer = setInterval(async () => {
     if ($('#app-view').hidden) return;
-    try { await Promise.all([loadAgents(), loadTests()]); } catch { /* a transient poll error is surfaced on the next action */ }
+    try { await Promise.all([loadAgents(), loadTests({ preserveActiveOutput: true })]); } catch { /* a transient poll error is surfaced on the next action */ }
   }, 4000);
 }
 
@@ -287,13 +287,14 @@ async function loadAgents() {
   populateAgentPermissions();
 }
 
-function renderTests() {
+function renderTests({ preserveActiveOutput = false } = {}) {
   const tbody = $('#tests-body');
   clear(tbody);
   for (const test of state.tests) {
     const tr = document.createElement('tr');
     const agent = state.agents.find((item) => item.id === test.agentId);
-    tr.append(cell(`${test.target}:${test.port}`), cell(agent?.name || test.agentId), cell(`${test.protocol.toUpperCase()}${test.reverse ? ' -R' : ''}`), cell(statusLabel(test.status)), cell(formatDate(test.createdAt)));
+    const agentName = agent?.name || test.agentName || test.agentId;
+    tr.append(cell(`${test.target}:${test.port}`), cell(test.agentDeleted ? `${agentName}（已删除）` : agentName), cell(`${test.protocol.toUpperCase()}${test.reverse ? ' -R' : ''}`), cell(statusLabel(test.status)), cell(formatDate(test.createdAt)));
     tbody.appendChild(tr);
   }
   const active = state.tests.find((test) => test.id === state.activeTestId) || state.tests.find((test) => test.status === 'running');
@@ -301,22 +302,25 @@ function renderTests() {
     state.activeTestId = active.id;
     $('#test-state').textContent = statusLabel(active.status);
     $('#cancel-test').disabled = active.status !== 'running';
-    const outputText = active.output.map((line) => line.line).join('\n');
-    $('#raw-output').textContent = outputText || '等待 Agent 输出。';
-    $('#raw-output').dataset.streaming = outputText ? '1' : '0';
-    $('#raw-output').scrollTop = $('#raw-output').scrollHeight;
-    const lastMetric = active.metrics.at(-1);
-    $('#current-rate').textContent = `${Number(lastMetric?.sendMbps || lastMetric?.recvMbps || 0).toFixed(1)} Mbps`;
-    drawChart(active.metrics);
+    const keepLiveResult = preserveActiveOutput && active.status === 'running';
+    if (!keepLiveResult) {
+      const outputText = active.output.map((line) => line.line).join('\n');
+      $('#raw-output').textContent = outputText ? `${outputText}\n` : '等待 Agent 输出。';
+      $('#raw-output').dataset.streaming = outputText ? '1' : '0';
+      $('#raw-output').scrollTop = $('#raw-output').scrollHeight;
+      const lastMetric = active.metrics.at(-1);
+      $('#current-rate').textContent = `${Number(lastMetric?.sendMbps || lastMetric?.recvMbps || 0).toFixed(1)} Mbps`;
+      drawChart(active.metrics);
+    }
   } else {
     $('#cancel-test').disabled = true;
   }
 }
 
-async function loadTests() {
+async function loadTests(options = {}) {
   const result = await api('/api/tests');
   state.tests = result.tests;
-  renderTests();
+  renderTests(options);
 }
 
 function drawChart(metrics) {

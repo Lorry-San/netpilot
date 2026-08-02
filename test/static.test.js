@@ -69,6 +69,11 @@ test('static assets and installer script are served', async (t) => {
     assert.ok((await response.text()).length > 1000, asset);
   }
 
+  const appScript = await (await fetch(`${base}/app.js`)).text();
+  assert.match(appScript, /loadTests\(\{ preserveActiveOutput: true \}\)/);
+  assert.match(appScript, /preserveActiveOutput && active\.status === 'running'/);
+  assert.match(appScript, /output\.append\(document\.createTextNode/);
+
   const installer = await fetch(`${base}/install-agent.sh`);
   assert.equal(installer.status, 200);
   const script = await installer.text();

@@ -90,7 +90,9 @@ function requireAdmin(user) {
 
 function canUseAgent(user, agentId) {
   if (user.role === 'admin') return true;
-  return Boolean(get('SELECT 1 FROM user_agent_permissions WHERE user_id = ? AND agent_id = ?', user.id, agentId));
+  return Boolean(get(`SELECT 1 FROM user_agent_permissions p
+                      JOIN agents a ON a.id = p.agent_id
+                      WHERE p.user_id = ? AND p.agent_id = ? AND a.deleted_at IS NULL`, user.id, agentId));
 }
 
 function agentView(agent) {
@@ -251,9 +253,12 @@ function sendAgent(agentId, message) {
 }
 
 function taskView(task) {
+  const agent = get('SELECT name, deleted_at FROM agents WHERE id = ?', task.agent_id);
   return {
     id: task.id,
     agentId: task.agent_id,
+    agentName: agent?.name || '',
+    agentDeleted: Boolean(agent?.deleted_at),
     target: task.target,
     port: task.port,
     protocol: task.protocol,
@@ -320,7 +325,7 @@ function handleAgentSocket(socket, req) {
     if (!authenticated) {
       if (message.type !== 'agent.auth') { socket.close(4003, 'authentication required'); return; }
       const token = message.token || message.payload?.token;
-      const agent = token ? get('SELECT * FROM agents WHERE token_hash = ?', hashToken(token)) : null;
+      const agent = token ? get('SELECT * FROM agents WHERE token_hash = ? AND deleted_at IS NULL', hashToken(token)) : null;
       if (!agent) { socket.close(4003, 'invalid token'); return; }
       const current = agentConnections.get(agent.id);
       if (current && current.readyState === WebSocket.OPEN) { socket.close(4004, 'agent already connected'); return; }
@@ -420,7 +425,9 @@ async function handleApi(req, res, pathname) {
     return json(res, 405, { error: 'Method not allowed' });
   }
   if (req.method === 'GET' && pathname === '/api/agents') {
-    const rows = user.role === 'admin' ? all('SELECT * FROM agents ORDER BY name') : all('SELECT a.* FROM agents a JOIN user_agent_permissions p ON p.agent_id = a.id WHERE p.user_id = ? ORDER BY a.name', user.id);
+    const rows = user.role === 'admin'
+      ? all('SELECT * FROM agents WHERE deleted_at IS NULL ORDER BY name')
+      : all('SELECT a.* FROM agents a JOIN user_agent_permissions p ON p.agent_id = a.id WHERE p.user_id = ? AND a.deleted_at IS NULL ORDER BY a.name', user.id);
     return json(res, 200, { agents: rows.map(agentView) });
   }
   if (req.method === 'GET' && pathname === '/api/tests') {
@@ -429,7 +436,7 @@ async function handleApi(req, res, pathname) {
   }
   if (req.method === 'POST' && pathname === '/api/tests') {
     const body = await bodyJson(req);
-    const agent = get('SELECT * FROM agents WHERE id = ?', String(body.agentId || ''));
+    const agent = get('SELECT * FROM agents WHERE id = ? AND deleted_at IS NULL', String(body.agentId || ''));
     if (!agent || !canUseAgent(user, agent.id)) return json(res, 403, { error: '无权使用该 Agent' });
     if (agent.status === 'offline') return json(res, 409, { error: 'Agent 当前离线' });
     if (agent.status === 'busy') return json(res, 409, { error: 'Agent 正在执行其他任务' });
@@ -482,7 +489,12 @@ async function handleApi(req, res, pathname) {
         return info.lastInsertRowid;
       });
       const newUser = get('SELECT * FROM users WHERE id = ?', result);
-      if (role === 'user' && Array.isArray(body.agentIds)) for (const agentId of body.agentIds) run('INSERT OR IGNORE INTO user_agent_permissions (user_id, agent_id) VALUES (?, ?)', result, String(agentId));
+      if (role === 'user' && Array.isArray(body.agentIds)) {
+        for (const agentId of body.agentIds) {
+          run(`INSERT OR IGNORE INTO user_agent_permissions (user_id, agent_id)
+               SELECT ?, id FROM agents WHERE id = ? AND deleted_at IS NULL`, result, String(agentId));
+        }
+      }
       audit(user.id, 'user.create', `user:${result}`, { role });
       return json(res, 201, { user: userView(newUser) });
     } catch (error) {
@@ -525,7 +537,7 @@ async function handleApi(req, res, pathname) {
   const installMatch = pathname.match(/^\/api\/admin\/agents\/([^/]+)\/install$/);
   if (req.method === 'POST' && installMatch) {
     requireAdmin(user);
-    const agent = get('SELECT * FROM agents WHERE id = ?', installMatch[1]);
+    const agent = get('SELECT * FROM agents WHERE id = ? AND deleted_at IS NULL', installMatch[1]);
     if (!agent) return json(res, 404, { error: 'Agent 不存在' });
     if (agent.status === 'online' || agentConnections.has(agent.id)) return json(res, 409, { error: 'Agent 在线时不能重新安装，请先断开 Agent' });
     const install = rotateAgentToken(agent, requestBaseUrl(req));
@@ -535,7 +547,7 @@ async function handleApi(req, res, pathname) {
   const updateMatch = pathname.match(/^\/api\/admin\/agents\/([^/]+)\/update-command$/);
   if (req.method === 'POST' && updateMatch) {
     requireAdmin(user);
-    const agent = get('SELECT * FROM agents WHERE id = ?', updateMatch[1]);
+    const agent = get('SELECT * FROM agents WHERE id = ? AND deleted_at IS NULL', updateMatch[1]);
     if (!agent) return json(res, 404, { error: 'Agent 不存在' });
     if (agent.status === 'busy') return json(res, 409, { error: 'Agent 正在执行测试，请等待任务结束后再更新' });
     const command = agentUpdateCommand(requestBaseUrl(req));
@@ -545,10 +557,14 @@ async function handleApi(req, res, pathname) {
   if (req.method === 'DELETE' && pathname.startsWith('/api/admin/agents/')) {
     requireAdmin(user);
     const agentId = pathname.split('/').pop();
-    const agent = get('SELECT * FROM agents WHERE id = ?', agentId);
+    const agent = get('SELECT * FROM agents WHERE id = ? AND deleted_at IS NULL', agentId);
     if (!agent) return json(res, 404, { error: 'Agent 不存在' });
     if (agent.status === 'online' || agentConnections.has(agent.id)) return json(res, 409, { error: 'Agent 在线时不能删除' });
-    run('DELETE FROM agents WHERE id = ?', agent.id);
+    const deletedAt = now();
+    transaction(() => {
+      run('DELETE FROM user_agent_permissions WHERE agent_id = ?', agent.id);
+      run('UPDATE agents SET status = \'offline\', deleted_at = ?, updated_at = ? WHERE id = ?', deletedAt, deletedAt, agent.id);
+    });
     audit(user.id, 'agent.delete', agent.id);
     return json(res, 200, { ok: true });
   }

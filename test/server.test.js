@@ -41,6 +41,26 @@ async function request(base, path, options = {}, session = '') {
 test('security invariants, roles and Agent installation lock', async (t) => {
   const directory = await mkdtemp(join(tmpdir(), 'netpilot-test-'));
   const dbPath = join(directory, 'test.sqlite');
+  const legacyDatabase = new DatabaseSync(dbPath);
+  legacyDatabase.exec(`CREATE TABLE agents (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    token_hash TEXT NOT NULL UNIQUE,
+    status TEXT NOT NULL DEFAULT 'offline' CHECK (status IN ('online', 'offline', 'busy')),
+    os TEXT NOT NULL DEFAULT 'linux',
+    arch TEXT NOT NULL DEFAULT 'unknown',
+    version TEXT NOT NULL DEFAULT '',
+    public_ip TEXT NOT NULL DEFAULT '',
+    ip_location TEXT NOT NULL DEFAULT '',
+    cpu_percent REAL NOT NULL DEFAULT 0,
+    memory_percent REAL NOT NULL DEFAULT 0,
+    upload_percent REAL NOT NULL DEFAULT 0,
+    download_percent REAL NOT NULL DEFAULT 0,
+    last_seen_at TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  )`);
+  legacyDatabase.close();
   const port = await unusedPort();
   const base = `http://127.0.0.1:${port}`;
   const root = resolve(import.meta.dirname, '..');
@@ -65,6 +85,8 @@ test('security invariants, roles and Agent installation lock', async (t) => {
   const session = login.response.headers.get('set-cookie').split(';', 1)[0];
 
   database = new DatabaseSync(dbPath);
+  database.exec('PRAGMA busy_timeout = 3000;');
+  assert.ok(database.prepare('PRAGMA table_info(agents)').all().some((column) => column.name === 'deleted_at'));
   const admin = database.prepare('SELECT * FROM users WHERE id = 1').get();
   assert.equal(admin.id, 1);
   assert.equal(admin.role, 'admin');
@@ -172,9 +194,37 @@ test('security invariants, roles and Agent installation lock', async (t) => {
 
   const version = await request(base, '/api/system/version', {}, session);
   assert.equal(version.response.status, 200);
-  assert.equal(version.body.current, '0.1.3');
+  assert.equal(version.body.current, '0.1.4');
   assert.ok(Object.hasOwn(version.body, 'updateAvailable'));
 
   socket.close();
   await once(socket, 'close');
+
+  const historicalTestId = 'test_agent_soft_delete';
+  const timestamp = new Date().toISOString();
+  database.prepare(`INSERT INTO tests
+    (id, user_id, agent_id, target, port, protocol, reverse, duration, parallel, status, started_at, finished_at, created_at)
+    VALUES (?, 1, ?, '127.0.0.1', 5201, 'tcp', 0, 10, 1, 'completed', ?, ?, ?)`)
+    .run(historicalTestId, agentID, timestamp, timestamp, timestamp);
+  database.prepare("INSERT INTO test_output (test_id, stream, line, created_at) VALUES (?, 'stdout', 'historical output', ?)").run(historicalTestId, timestamp);
+
+  const deleted = await request(base, `/api/admin/agents/${agentID}`, { method: 'DELETE' }, session);
+  assert.equal(deleted.response.status, 200);
+  assert.ok(database.prepare('SELECT deleted_at FROM agents WHERE id = ?').get(agentID).deleted_at);
+  assert.equal(database.prepare('SELECT COUNT(*) AS count FROM tests WHERE agent_id = ?').get(agentID).count, 1);
+  assert.equal(database.prepare('SELECT COUNT(*) AS count FROM test_output WHERE test_id = ?').get(historicalTestId).count, 1);
+  assert.equal(database.prepare('SELECT COUNT(*) AS count FROM user_agent_permissions WHERE agent_id = ?').get(agentID).count, 0);
+
+  const adminAgentsAfterDelete = await request(base, '/api/agents', {}, session);
+  assert.ok(!adminAgentsAfterDelete.body.agents.some((agent) => agent.id === agentID));
+  const userAgentsAfterDelete = await request(base, '/api/agents', {}, userSession);
+  assert.ok(!userAgentsAfterDelete.body.agents.some((agent) => agent.id === agentID));
+  const testsAfterDelete = await request(base, '/api/tests', {}, session);
+  const preservedTest = testsAfterDelete.body.tests.find((item) => item.id === historicalTestId);
+  assert.equal(preservedTest.agentName, "CI Agent's node");
+  assert.equal(preservedTest.agentDeleted, true);
+  const deletedInstall = await request(base, `/api/admin/agents/${agentID}/install`, { method: 'POST', body: '{}' }, session);
+  assert.equal(deletedInstall.response.status, 404);
+  const deletedAgain = await request(base, `/api/admin/agents/${agentID}`, { method: 'DELETE' }, session);
+  assert.equal(deletedAgain.response.status, 404);
 });

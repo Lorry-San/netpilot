@@ -13,12 +13,22 @@ const publicBaseUrl = (process.env.PUBLIC_BASE_URL || `http://localhost:${port}`
 const githubRepo = process.env.GITHUB_REPO || 'Lorry-San/netpilot';
 const sessionTtlMs = 24 * 60 * 60 * 1000;
 const agentConnections = new Map();
+const agentUpdateJobs = new Map();
+const agentUpdateByAgent = new Map();
 const uiClients = new Set();
 
 function broadcastTask(task, message) {
   const data = JSON.stringify(message);
   for (const client of uiClients) {
     if (client.role !== 'admin' && client.userId !== task.user_id) continue;
+    if (client.socket.readyState === WebSocket.OPEN) client.socket.send(data);
+  }
+}
+
+function broadcastAgentUpdate(agentId, payload) {
+  const data = JSON.stringify({ type: 'agent.update', agentId, payload });
+  for (const client of uiClients) {
+    if (client.role !== 'admin') continue;
     if (client.socket.readyState === WebSocket.OPEN) client.socket.send(data);
   }
 }
@@ -114,8 +124,16 @@ function agentView(agent) {
   };
 }
 
-function userView(user) {
-  return {
+function userAgentIds(userId) {
+  return all(`SELECT p.agent_id
+              FROM user_agent_permissions p
+              JOIN agents a ON a.id = p.agent_id
+              WHERE p.user_id = ? AND a.deleted_at IS NULL
+              ORDER BY a.name`, userId).map((row) => row.agent_id);
+}
+
+function userView(user, includeAgentIds = false) {
+  const view = {
     id: user.id,
     username: user.username,
     displayName: user.display_name,
@@ -124,6 +142,23 @@ function userView(user) {
     createdAt: user.created_at,
     updatedAt: user.updated_at
   };
+  if (includeAgentIds) view.agentIds = user.role === 'user' ? userAgentIds(user.id) : [];
+  return view;
+}
+
+function validateDisplayName(displayName) {
+  const value = String(displayName || '').trim();
+  if (value.length < 1 || value.length > 80) return null;
+  return value;
+}
+
+function replaceUserAgentPermissions(userId, agentIds) {
+  run('DELETE FROM user_agent_permissions WHERE user_id = ?', userId);
+  if (!Array.isArray(agentIds)) return;
+  for (const agentId of agentIds) {
+    run(`INSERT OR IGNORE INTO user_agent_permissions (user_id, agent_id)
+         SELECT ?, id FROM agents WHERE id = ? AND deleted_at IS NULL`, userId, String(agentId));
+  }
 }
 
 const currentVersion = JSON.parse(readFileSync(join(rootDir, 'package.json'), 'utf8')).version || '0.0.0';
@@ -227,6 +262,124 @@ function agentUpdateCommand(baseUrl = publicBaseUrl) {
   return `(tmp="$(mktemp)" && trap 'rm -f "$tmp"' EXIT HUP INT TERM && curl -fsSL ${shellQuote(script)} -o "$tmp" && env ${environment} sh "$tmp")`;
 }
 
+function agentUpdatePayload(baseUrl = publicBaseUrl) {
+  const settings = getSettings();
+  const scriptBase = settings.script_base || baseUrl;
+  const accel = settings.github_accel_enabled === '1' ? String(settings.github_accel_domain || '').trim() : '';
+  return {
+    scriptUrl: `${scriptBase}/update-agent.sh`,
+    repo: githubRepo,
+    githubAccel: accel ? (accel.endsWith('/') ? accel : `${accel}/`) : ''
+  };
+}
+
+function completeAgentUpdate(updateId, success, details = {}) {
+  const job = agentUpdateJobs.get(updateId);
+  if (!job) return;
+  clearTimeout(job.timer);
+  agentUpdateJobs.delete(updateId);
+  if (agentUpdateByAgent.get(job.agentId) === updateId) agentUpdateByAgent.delete(job.agentId);
+  const agent = get('SELECT * FROM agents WHERE id = ?', job.agentId);
+  const newVersion = String(details.newVersion || agent?.version || job.oldVersion || '');
+  const status = agentConnections.has(job.agentId) ? 'online' : 'offline';
+  run('UPDATE agents SET status = ?, version = COALESCE(NULLIF(?, \'\'), version), updated_at = ? WHERE id = ?', status, success && newVersion !== 'unknown' ? newVersion : '', now(), job.agentId);
+  const payload = {
+    id: updateId,
+    status: success ? 'success' : 'failed',
+    success,
+    agentId: job.agentId,
+    agentName: agent?.name || job.agentName || job.agentId,
+    oldVersion: job.oldVersion || '',
+    newVersion,
+    error: details.error || '',
+    output: details.output || job.output.slice(-30).join('\n')
+  };
+  broadcastAgentUpdate(job.agentId, payload);
+  audit(job.userId, success ? 'agent.update.success' : 'agent.update.failed', job.agentId, { oldVersion: payload.oldVersion, newVersion: payload.newVersion, error: payload.error });
+}
+
+function maybeCompleteReconnectUpdate(agentId, newVersion) {
+  const updateId = agentUpdateByAgent.get(agentId);
+  const job = updateId ? agentUpdateJobs.get(updateId) : null;
+  const versionText = String(newVersion || '');
+  if (!job || !versionText || !job.oldVersion || versionText === job.oldVersion) return;
+  completeAgentUpdate(updateId, true, { newVersion: versionText, output: 'Agent reconnected after the updater restarted the service.' });
+}
+
+function handleAgentUpdateMessage(agentId, message) {
+  const updateId = message.taskId || message.payload?.updateId;
+  const job = updateId ? agentUpdateJobs.get(updateId) : null;
+  if (!job || job.agentId !== agentId) return;
+  const payload = message.payload || {};
+  if (message.type === 'agent.update.started') {
+    job.output.push('Agent accepted the automatic update request.');
+    broadcastAgentUpdate(agentId, {
+      id: updateId,
+      status: 'running',
+      success: null,
+      agentId,
+      agentName: job.agentName,
+      oldVersion: job.oldVersion || payload.oldVersion || '',
+      newVersion: '',
+      error: '',
+      output: job.output.slice(-30).join('\n')
+    });
+    return;
+  }
+  if (message.type === 'agent.update.output') {
+    const line = String(payload.line || '').slice(0, 1000);
+    if (line) job.output.push(line);
+    return;
+  }
+  if (message.type === 'agent.update.done') {
+    const exitCode = Number(payload.exitCode ?? 1);
+    completeAgentUpdate(updateId, exitCode === 0, {
+      newVersion: String(payload.newVersion || ''),
+      error: exitCode === 0 ? '' : String(payload.error || `updater exited with ${exitCode}`),
+      output: job.output.slice(-30).join('\n')
+    });
+  }
+}
+
+function startAgentUpdate(user, agent, baseUrl) {
+  if (agent.status === 'busy') throw Object.assign(new Error('Agent 正在执行任务，任务结束后再自动更新'), { status: 409 });
+  if (agentUpdateByAgent.has(agent.id)) throw Object.assign(new Error('该 Agent 已有自动更新任务正在进行'), { status: 409 });
+  const connection = agentConnections.get(agent.id);
+  if (!connection || connection.readyState !== WebSocket.OPEN) throw Object.assign(new Error('Agent 不在线，无法自动更新；请使用手动更新命令'), { status: 409 });
+  const updateId = `update_${randomToken(12)}`;
+  const job = {
+    id: updateId,
+    userId: user.id,
+    agentId: agent.id,
+    agentName: agent.name,
+    oldVersion: agent.version || 'unknown',
+    output: [],
+    timer: setTimeout(() => completeAgentUpdate(updateId, false, { error: '自动更新超时：Agent 未在限定时间内回报结果或新版本连接' }), 180000)
+  };
+  job.timer.unref?.();
+  agentUpdateJobs.set(updateId, job);
+  agentUpdateByAgent.set(agent.id, updateId);
+  run('UPDATE agents SET status = \'busy\', updated_at = ? WHERE id = ?', now(), agent.id);
+  const sent = sendAgent(agent.id, { type: 'agent.update.start', taskId: updateId, payload: { ...agentUpdatePayload(baseUrl), oldVersion: job.oldVersion } });
+  if (!sent) {
+    completeAgentUpdate(updateId, false, { error: 'Agent 连接在自动更新下发前断开' });
+    throw Object.assign(new Error('Agent 已断开，自动更新未下发'), { status: 409 });
+  }
+  broadcastAgentUpdate(agent.id, {
+    id: updateId,
+    status: 'queued',
+    success: null,
+    agentId: agent.id,
+    agentName: agent.name,
+    oldVersion: job.oldVersion,
+    newVersion: '',
+    error: '',
+    output: ''
+  });
+  audit(user.id, 'agent.update.auto', agent.id, { oldVersion: job.oldVersion });
+  return { id: updateId, status: 'queued', oldVersion: job.oldVersion };
+}
+
 function createAgent(name, baseUrl) {
   const id = `agent_${randomToken(9)}`;
   const token = randomToken(32);
@@ -289,6 +442,11 @@ function handleAgentMessage(socket, agentId, message) {
   if (type === 'agent.info') {
     const payload = message.payload || {};
     run('UPDATE agents SET os = ?, arch = ?, version = ?, public_ip = COALESCE(NULLIF(?, \'\'), public_ip), ip_location = COALESCE(NULLIF(?, \'\'), ip_location), last_seen_at = ?, updated_at = ? WHERE id = ?', payload.os || 'linux', payload.arch || 'unknown', payload.version || '', payload.publicIp || '', payload.ipLocation || '', now(), now(), agentId);
+    maybeCompleteReconnectUpdate(agentId, payload.version);
+    return;
+  }
+  if (type.startsWith('agent.update.')) {
+    handleAgentUpdateMessage(agentId, message);
     return;
   }
   const taskId = message.taskId || message.payload?.taskId;
@@ -335,6 +493,7 @@ function handleAgentSocket(socket, req) {
       agentConnections.set(agentId, socket);
       const payload = message.payload || {};
       run(`UPDATE agents SET status = 'online', os = ?, arch = ?, version = ?, public_ip = ?, last_seen_at = ?, updated_at = ? WHERE id = ?`, payload.os || 'linux', payload.arch || 'unknown', payload.version || '', remoteIp(req), now(), now(), agentId);
+      maybeCompleteReconnectUpdate(agentId, payload.version);
       socket.send(JSON.stringify({ type: 'agent.auth.ok', agentId, serverTime: now() }));
       return;
     }
@@ -378,6 +537,21 @@ async function handleApi(req, res, pathname) {
   }
   if (req.method === 'GET' && pathname === '/api/me') return json(res, 200, { user: user ? userView(user) : null });
   requireUser(user);
+  if (req.method === 'PATCH' && pathname === '/api/me') {
+    const body = await bodyJson(req);
+    const displayName = body.displayName === undefined ? user.display_name : validateDisplayName(body.displayName);
+    if (!displayName) return json(res, 400, { error: '显示名称无效' });
+    const fullUser = get('SELECT * FROM users WHERE id = ?', user.id);
+    let passwordHash = fullUser.password_hash;
+    if (body.newPassword) {
+      if (String(body.newPassword).length < 12) return json(res, 400, { error: '新密码至少需要 12 个字符' });
+      if (!(await verifyPassword(String(body.currentPassword || ''), fullUser.password_hash))) return json(res, 403, { error: '当前密码不正确' });
+      passwordHash = await hashPassword(String(body.newPassword));
+    }
+    run('UPDATE users SET display_name = ?, password_hash = ?, updated_at = ? WHERE id = ?', displayName, passwordHash, now(), user.id);
+    audit(user.id, 'user.self.update', `user:${user.id}`, { passwordChanged: Boolean(body.newPassword) });
+    return json(res, 200, { user: userView(get('SELECT * FROM users WHERE id = ?', user.id)) });
+  }
   if (req.method === 'GET' && pathname === '/api/system/version') {
     const refreshRequested = new URL(req.url, 'http://localhost').searchParams.get('refresh') === '1';
     if (refreshRequested && user.id === 1) latestReleaseCache.checkedAt = 0;
@@ -471,7 +645,7 @@ async function handleApi(req, res, pathname) {
   }
   if (req.method === 'GET' && pathname === '/api/users') {
     requireAdmin(user);
-    return json(res, 200, { users: all('SELECT * FROM users ORDER BY id').map(userView) });
+    return json(res, 200, { users: all('SELECT * FROM users ORDER BY id').map((row) => userView(row, true)) });
   }
   if (req.method === 'POST' && pathname === '/api/users') {
     requireAdmin(user);
@@ -489,20 +663,21 @@ async function handleApi(req, res, pathname) {
         return info.lastInsertRowid;
       });
       const newUser = get('SELECT * FROM users WHERE id = ?', result);
-      if (role === 'user' && Array.isArray(body.agentIds)) {
-        for (const agentId of body.agentIds) {
-          run(`INSERT OR IGNORE INTO user_agent_permissions (user_id, agent_id)
-               SELECT ?, id FROM agents WHERE id = ? AND deleted_at IS NULL`, result, String(agentId));
-        }
-      }
+      if (role === 'user') replaceUserAgentPermissions(result, body.agentIds);
       audit(user.id, 'user.create', `user:${result}`, { role });
-      return json(res, 201, { user: userView(newUser) });
+      return json(res, 201, { user: userView(newUser, true) });
     } catch (error) {
       if (String(error.message).includes('UNIQUE')) return json(res, 409, { error: '用户名已存在' });
       throw error;
     }
   }
   const userMatch = pathname.match(/^\/api\/users\/(\d+)$/);
+  if (req.method === 'GET' && userMatch) {
+    requireAdmin(user);
+    const target = get('SELECT * FROM users WHERE id = ?', Number(userMatch[1]));
+    if (!target) return json(res, 404, { error: '用户不存在' });
+    return json(res, 200, { user: userView(target, true) });
+  }
   if (req.method === 'PATCH' && userMatch) {
     requireAdmin(user);
     const targetId = Number(userMatch[1]);
@@ -512,9 +687,20 @@ async function handleApi(req, res, pathname) {
     if (targetId === 1 && (body.role && body.role !== 'admin' || body.disabled === true)) return json(res, 400, { error: 'uid=1 系统管理员不可降权或禁用' });
     const role = body.role === 'admin' ? 'admin' : body.role === 'user' ? 'user' : target.role;
     const disabled = typeof body.disabled === 'boolean' ? (body.disabled ? 1 : 0) : target.disabled;
-    run('UPDATE users SET role = ?, disabled = ?, updated_at = ? WHERE id = ?', role, disabled, now(), targetId);
-    audit(user.id, 'user.update', `user:${targetId}`, { role, disabled: Boolean(disabled) });
-    return json(res, 200, { user: userView(get('SELECT * FROM users WHERE id = ?', targetId)) });
+    const displayName = body.displayName === undefined ? target.display_name : validateDisplayName(body.displayName);
+    if (!displayName) return json(res, 400, { error: '显示名称无效' });
+    let passwordHash = target.password_hash;
+    if (body.password) {
+      if (String(body.password).length < 12) return json(res, 400, { error: '密码至少需要 12 个字符' });
+      passwordHash = await hashPassword(String(body.password));
+    }
+    transaction(() => {
+      run('UPDATE users SET display_name = ?, password_hash = ?, role = ?, disabled = ?, updated_at = ? WHERE id = ?', displayName, passwordHash, role, disabled, now(), targetId);
+      if (role === 'admin') run('DELETE FROM user_agent_permissions WHERE user_id = ?', targetId);
+      else if (Array.isArray(body.agentIds)) replaceUserAgentPermissions(targetId, body.agentIds);
+    });
+    audit(user.id, 'user.update', `user:${targetId}`, { role, disabled: Boolean(disabled), permissionsChanged: Array.isArray(body.agentIds), passwordChanged: Boolean(body.password) });
+    return json(res, 200, { user: userView(get('SELECT * FROM users WHERE id = ?', targetId), true) });
   }
   if (req.method === 'DELETE' && userMatch) {
     requireAdmin(user);
@@ -553,6 +739,14 @@ async function handleApi(req, res, pathname) {
     const command = agentUpdateCommand(requestBaseUrl(req));
     audit(user.id, 'agent.update.command', agent.id);
     return json(res, 200, { agent: agentView(agent), update: { command } });
+  }
+  const autoUpdateMatch = pathname.match(/^\/api\/admin\/agents\/([^/]+)\/update$/);
+  if (req.method === 'POST' && autoUpdateMatch) {
+    requireAdmin(user);
+    const agent = get('SELECT * FROM agents WHERE id = ? AND deleted_at IS NULL', autoUpdateMatch[1]);
+    if (!agent) return json(res, 404, { error: 'Agent 不存在' });
+    const update = startAgentUpdate(user, agent, requestBaseUrl(req));
+    return json(res, 202, { agent: agentView(get('SELECT * FROM agents WHERE id = ?', agent.id)), update });
   }
   if (req.method === 'DELETE' && pathname.startsWith('/api/admin/agents/')) {
     requireAdmin(user);

@@ -1,4 +1,4 @@
-const state = { user: null, agents: [], users: [], tests: [], activeTestId: null, pollTimer: null, settingsLoaded: false };
+const state = { user: null, agents: [], users: [], tests: [], activeTestId: null, pollTimer: null, settingsLoaded: false, liveSocket: null };
 const $ = (selector) => document.querySelector(selector);
 const $$ = (selector) => [...document.querySelectorAll(selector)];
 
@@ -49,11 +49,40 @@ function roleLabel(role) {
 }
 
 function statusLabel(status) {
-  return { online: '在线', offline: '离线', busy: '测试中', running: '运行中', queued: '排队中', completed: '已完成', failed: '失败', cancelled: '已取消', timeout: '超时' }[status] || status;
+  return { online: '在线', offline: '离线', busy: '忙碌中', running: '运行中', queued: '排队中', completed: '已完成', failed: '失败', cancelled: '已取消', timeout: '超时' }[status] || status;
 }
 
 function percentText(value) {
   return value === null || value === undefined || Number.isNaN(Number(value)) ? '--' : `${Number(value).toFixed(1)}%`;
+}
+
+function versionText(value) {
+  if (!value) return '未知';
+  const text = String(value);
+  return /^\d+\.\d+/.test(text) ? `v${text}` : text;
+}
+
+function showUpdateBanner(payload, tone = 'info') {
+  const banner = $('#update-banner');
+  banner.className = `update-banner ${tone}`;
+  banner.textContent = payload;
+  banner.hidden = false;
+}
+
+function renderAgentUpdateStatus(payload = {}) {
+  const name = payload.agentName || state.agents.find((agent) => agent.id === payload.agentId)?.name || payload.agentId || 'Agent';
+  const oldVersion = versionText(payload.oldVersion);
+  const newVersion = payload.newVersion ? versionText(payload.newVersion) : '未知';
+  if (payload.status === 'queued') {
+    showUpdateBanner(`自动更新已下发：${name}，原版本 ${oldVersion}，等待 Agent 执行。`, 'info');
+  } else if (payload.status === 'running') {
+    showUpdateBanner(`自动更新进行中：${name}，原版本 ${oldVersion}。`, 'info');
+  } else if (payload.success === true || payload.status === 'success') {
+    showUpdateBanner(`自动更新成功：${name}，${oldVersion} → ${newVersion}。`, 'success');
+  } else if (payload.success === false || payload.status === 'failed') {
+    const reason = payload.error ? `原因：${payload.error}` : '请查看 Agent 主机日志或使用手动更新命令重试。';
+    showUpdateBanner(`自动更新失败：${name}，原版本 ${oldVersion}，更新后版本 ${newVersion}。${reason}`, 'danger');
+  }
 }
 
 function appendOutput(line) {
@@ -64,6 +93,11 @@ function appendOutput(line) {
 }
 
 function handleLiveMessage(message) {
+  if (message.type === 'agent.update') {
+    renderAgentUpdateStatus(message.payload || {});
+    loadAgents().catch(() => {});
+    return;
+  }
   const taskId = message.taskId;
   if (!taskId) return;
   const test = state.tests.find((item) => item.id === taskId);
@@ -107,10 +141,24 @@ function disconnectLive() {
   socket.close();
 }
 
+function closeAccountMenu() {
+  $('#account-menu').hidden = true;
+  $('#account-button').setAttribute('aria-expanded', 'false');
+}
+
+function refreshAccount() {
+  if (!state.user) return;
+  $('#account-name').textContent = state.user.displayName;
+  $('#account-role').textContent = `${state.user.username} · ${roleLabel(state.user.role)}`;
+  $('#account-uid').textContent = state.user.id;
+}
+
 function showLogin() {
   $('#login-view').hidden = false;
   $('#app-view').hidden = true;
+  $('#update-banner').hidden = true;
   clearInterval(state.pollTimer);
+  closeAccountMenu();
   disconnectLive();
 }
 
@@ -118,13 +166,13 @@ async function showApp(user) {
   state.user = user;
   $('#login-view').hidden = true;
   $('#app-view').hidden = false;
-  $('#account-name').textContent = user.displayName;
-  $('#account-role').textContent = `${user.username} · ${roleLabel(user.role)}`;
+  refreshAccount();
   $$('[data-admin-only]').forEach((node) => { node.hidden = user.role !== 'admin'; });
   $$('[data-system-admin-only]').forEach((node) => { node.hidden = user.id !== 1; });
   setView('tests');
   try {
-    await Promise.all([loadAgents(), loadTests(), user.role === 'admin' ? loadUsers() : Promise.resolve()]);
+    await loadAgents();
+    await Promise.all([loadTests(), user.role === 'admin' ? loadUsers() : Promise.resolve()]);
   } catch (error) {
     console.error(error);
     toast(`数据加载失败：${error.message}`);
@@ -155,7 +203,7 @@ async function loadVersion(refresh = false) {
   notice.classList.toggle('update', result.updateAvailable === true);
   if (result.updateAvailable) {
     notice.textContent = `发现 v${result.latest}`;
-    $('#version-message').textContent = `发现新版本 v${result.latest}，请在服务器执行更新命令。`;
+    $('#version-message').textContent = `发现新版本 v${result.latest}，可在服务器执行手动更新命令。`;
   } else if (result.updateAvailable === false) {
     notice.textContent = `v${result.current}`;
     $('#version-message').textContent = '当前已经是最新版本。';
@@ -221,6 +269,52 @@ function updateSelectedAgent() {
   $('#start-test').disabled = !agent || agent.status !== 'online';
 }
 
+function selectedAgentIds(containerId) {
+  const container = $(`#${containerId}`);
+  if (!container) return [];
+  return [...container.querySelectorAll('input[type="checkbox"]:checked')].map((input) => input.value);
+}
+
+function renderAgentCheckboxes(containerId, selectedIds = []) {
+  const container = $(`#${containerId}`);
+  if (!container) return;
+  const selected = new Set(selectedIds);
+  clear(container);
+  if (!state.agents.length) {
+    const empty = document.createElement('p');
+    empty.className = 'empty-choice';
+    empty.textContent = '暂无可授权 Agent';
+    container.appendChild(empty);
+    return;
+  }
+  for (const agent of state.agents) {
+    const label = document.createElement('label');
+    label.className = 'agent-choice';
+    const input = document.createElement('input');
+    input.type = 'checkbox';
+    input.value = agent.id;
+    input.checked = selected.has(agent.id);
+    const text = document.createElement('span');
+    text.textContent = `${agent.name} · ${statusLabel(agent.status)}`;
+    label.append(input, text);
+    container.appendChild(label);
+  }
+}
+
+function populateAgentPermissions() {
+  renderAgentCheckboxes('new-agent-ids', selectedAgentIds('new-agent-ids'));
+  renderAgentCheckboxes('edit-agent-ids', selectedAgentIds('edit-agent-ids'));
+}
+
+function pickerAction(containerId, action) {
+  const inputs = $(`#${containerId}`)?.querySelectorAll('input[type="checkbox"]') || [];
+  for (const input of inputs) {
+    if (action === 'all') input.checked = true;
+    else if (action === 'clear') input.checked = false;
+    else if (action === 'invert') input.checked = !input.checked;
+  }
+}
+
 function showInstall(install) {
   $('#install-docker').value = install.docker;
   $('#install-script').value = install.script;
@@ -232,6 +326,17 @@ function showAgentUpdate(update) {
   $('#agent-update-command').value = update.command;
   $('#update-agent-panel').hidden = false;
   $('#update-agent-panel').scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
+async function requestAutoUpdate(agent) {
+  try {
+    const result = await api(`/api/admin/agents/${encodeURIComponent(agent.id)}/update`, { method: 'POST', body: '{}' });
+    renderAgentUpdateStatus({ status: 'queued', agentId: agent.id, agentName: agent.name, oldVersion: result.update.oldVersion });
+    await loadAgents();
+  } catch (error) {
+    showUpdateBanner(`自动更新失败：${agent.name}，原版本 ${versionText(agent.version)}，更新后版本未知。原因：${error.message}`, 'danger');
+    toast(error.message);
+  }
 }
 
 function renderAgents() {
@@ -249,7 +354,8 @@ function renderAgents() {
     actions.className = 'row-actions';
     if (state.user.role === 'admin') {
       const connected = agent.status === 'online' || agent.status === 'busy';
-      actions.appendChild(button(agent.status === 'busy' ? '测试中不可更新' : '更新命令', 'secondary', async () => {
+      actions.appendChild(button(agent.status === 'online' ? '自动更新' : (agent.status === 'busy' ? '忙碌中' : '离线不可自动'), 'secondary', () => requestAutoUpdate(agent), agent.status !== 'online'));
+      actions.appendChild(button(agent.status === 'busy' ? '忙碌中' : '手动更新', 'secondary', async () => {
         try {
           const result = await api(`/api/admin/agents/${encodeURIComponent(agent.id)}/update-command`, { method: 'POST', body: '{}' });
           showAgentUpdate(result.update);
@@ -285,6 +391,7 @@ async function loadAgents() {
   renderAgents();
   renderAgentSelect();
   populateAgentPermissions();
+  if (state.users.length) renderUsers();
 }
 
 function renderTests({ preserveActiveOutput = false } = {}) {
@@ -381,6 +488,14 @@ function drawChart(metrics) {
   $('#recv-line').setAttribute('points', points('recvMbps'));
 }
 
+function agentPermissionSummary(user) {
+  if (user.role === 'admin') return '全部 Agent';
+  const ids = user.agentIds || [];
+  if (!ids.length) return '未授权';
+  const names = ids.map((id) => state.agents.find((agent) => agent.id === id)?.name || id);
+  return names.length > 3 ? `${names.slice(0, 3).join('、')} 等 ${names.length} 个` : names.join('、');
+}
+
 function renderUsers() {
   const tbody = $('#users-body');
   clear(tbody);
@@ -388,22 +503,9 @@ function renderUsers() {
     const tr = document.createElement('tr');
     const identity = document.createElement('span');
     identity.textContent = `${user.displayName} (${user.username})`;
-    const role = document.createElement('select');
-    role.className = 'role-select';
-    for (const value of ['user', 'admin']) {
-      const option = document.createElement('option');
-      option.value = value;
-      option.textContent = roleLabel(value);
-      option.selected = value === user.role;
-      role.appendChild(option);
-    }
-    role.disabled = user.id === 1;
-    role.addEventListener('change', async () => {
-      try { await api(`/api/users/${user.id}`, { method: 'PATCH', body: JSON.stringify({ role: role.value }) }); await loadUsers(); }
-      catch (error) { toast(error.message); role.value = user.role; }
-    });
     const actions = document.createElement('div');
     actions.className = 'row-actions';
+    actions.appendChild(button('修改', 'secondary', () => openEditUser(user)));
     actions.appendChild(button(user.disabled ? '启用' : '禁用', 'secondary', async () => {
       try { await api(`/api/users/${user.id}`, { method: 'PATCH', body: JSON.stringify({ disabled: !user.disabled }) }); await loadUsers(); }
       catch (error) { toast(error.message); }
@@ -413,7 +515,7 @@ function renderUsers() {
       try { await api(`/api/users/${user.id}`, { method: 'DELETE' }); await loadUsers(); }
       catch (error) { toast(error.message); }
     }, user.id === 1));
-    tr.append(cell(user.id), cell(identity), cell(role), cell(user.disabled ? '已禁用' : '已启用'), cell(actions));
+    tr.append(cell(user.id), cell(identity), cell(roleLabel(user.role)), cell(agentPermissionSummary(user)), cell(user.disabled ? '已禁用' : '已启用'), cell(actions));
     tbody.appendChild(tr);
   }
 }
@@ -425,15 +527,42 @@ async function loadUsers() {
   renderUsers();
 }
 
-function populateAgentPermissions() {
-  const select = $('#new-agent-ids');
-  clear(select);
-  for (const agent of state.agents) {
-    const option = document.createElement('option');
-    option.value = agent.id;
-    option.textContent = agent.name;
-    select.appendChild(option);
-  }
+function syncAgentAccessRows() {
+  $('#new-agent-access-row').hidden = $('#new-role').value === 'admin';
+  $('#edit-agent-access-row').hidden = $('#edit-role').value === 'admin';
+}
+
+async function openEditUser(user) {
+  const detail = Array.isArray(user.agentIds) ? user : (await api(`/api/users/${user.id}`)).user;
+  $('#edit-user-id').value = detail.id;
+  $('#edit-uid').value = detail.id;
+  $('#edit-username').value = detail.username;
+  $('#edit-display-name').value = detail.displayName;
+  $('#edit-role').value = detail.role;
+  $('#edit-disabled').checked = detail.disabled;
+  $('#edit-password').value = '';
+  $('#edit-role').disabled = detail.id === 1;
+  $('#edit-disabled').disabled = detail.id === 1;
+  renderAgentCheckboxes('edit-agent-ids', detail.agentIds || []);
+  syncAgentAccessRows();
+  $('#user-edit-dialog').showModal();
+}
+
+function openProfileDialog() {
+  closeAccountMenu();
+  $('#profile-uid').value = state.user.id;
+  $('#profile-username').value = state.user.username;
+  $('#profile-display-name').value = state.user.displayName;
+  $('#profile-current-password').value = '';
+  $('#profile-new-password').value = '';
+  $('#profile-confirm-password').value = '';
+  $('#profile-dialog').showModal();
+}
+
+async function logout() {
+  await api('/api/auth/logout', { method: 'POST', body: '{}' }).catch(() => {});
+  state.user = null;
+  showLogin();
 }
 
 $('#login-form').addEventListener('submit', async (event) => {
@@ -446,10 +575,36 @@ $('#login-form').addEventListener('submit', async (event) => {
   } catch (error) { $('#login-error').textContent = error.message; }
 });
 
-$('#logout-button').addEventListener('click', async () => {
-  await api('/api/auth/logout', { method: 'POST', body: '{}' }).catch(() => {});
-  state.user = null;
-  showLogin();
+$('#logout-button').addEventListener('click', logout);
+$('#account-logout-button').addEventListener('click', logout);
+$('#account-button').addEventListener('click', (event) => {
+  event.stopPropagation();
+  const menu = $('#account-menu');
+  menu.hidden = !menu.hidden;
+  $('#account-button').setAttribute('aria-expanded', String(!menu.hidden));
+});
+$('#open-profile').addEventListener('click', openProfileDialog);
+document.addEventListener('click', (event) => {
+  if (!(event.target instanceof Element) || !event.target.closest('.account-shell')) closeAccountMenu();
+});
+
+$('#profile-form').addEventListener('submit', async (event) => {
+  event.preventDefault();
+  const form = event.currentTarget;
+  if (event.submitter?.value === 'cancel') { $('#profile-dialog').close(); return; }
+  if (!form.reportValidity()) return;
+  const newPassword = $('#profile-new-password').value;
+  const confirmPassword = $('#profile-confirm-password').value;
+  if (newPassword !== confirmPassword) { toast('两次输入的新密码不一致'); return; }
+  if (newPassword && !$('#profile-current-password').value) { toast('修改密码需要填写当前密码'); return; }
+  try {
+    const result = await api('/api/me', { method: 'PATCH', body: JSON.stringify({ displayName: $('#profile-display-name').value, currentPassword: $('#profile-current-password').value, newPassword }) });
+    state.user = result.user;
+    refreshAccount();
+    $('#profile-dialog').close();
+    toast('账户设置已保存');
+    if (state.user.role === 'admin') await loadUsers();
+  } catch (error) { toast(error.message); }
 });
 
 $('.sidebar nav').addEventListener('click', (event) => {
@@ -476,7 +631,7 @@ $('#settings-form').addEventListener('submit', async (event) => {
       })
     });
     await loadSettings();
-    toast('系统设置已保存，新生成的安装命令将使用这些地址');
+    toast('系统设置已保存，新生成的安装和更新命令会使用这些地址');
   } catch (error) { toast(error.message); }
   finally { saveButton.disabled = false; }
 });
@@ -533,19 +688,46 @@ $$('.copy-command').forEach((node) => node.addEventListener('click', async () =>
   catch { toast('复制失败，请手动选择命令'); }
 }));
 
-$('#add-user').addEventListener('click', () => $('#user-dialog').showModal());
-$('#new-role').addEventListener('change', () => { $('#new-agent-access-row').hidden = $('#new-role').value === 'admin'; });
+$$('.picker-action').forEach((node) => node.addEventListener('click', () => pickerAction(node.dataset.picker, node.dataset.action)));
+$('#add-user').addEventListener('click', () => {
+  $('#user-form').reset();
+  renderAgentCheckboxes('new-agent-ids', []);
+  syncAgentAccessRows();
+  $('#user-dialog').showModal();
+});
+$('#new-role').addEventListener('change', syncAgentAccessRows);
+$('#edit-role').addEventListener('change', syncAgentAccessRows);
 $('#user-form').addEventListener('submit', async (event) => {
   event.preventDefault();
   const form = event.currentTarget;
   if (event.submitter?.value === 'cancel') { $('#user-dialog').close(); return; }
   if (!form.reportValidity()) return;
-  const agentIds = [...$('#new-agent-ids').selectedOptions].map((option) => option.value);
+  const agentIds = selectedAgentIds('new-agent-ids');
   try {
     await api('/api/users', { method: 'POST', body: JSON.stringify({ username: $('#new-username').value, displayName: $('#new-display-name').value, password: $('#new-password').value, role: $('#new-role').value, agentIds }) });
     $('#user-dialog').close();
     form.reset();
-    $('#new-agent-access-row').hidden = false;
+    await loadUsers();
+  } catch (error) { toast(error.message); }
+});
+
+$('#user-edit-form').addEventListener('submit', async (event) => {
+  event.preventDefault();
+  const form = event.currentTarget;
+  if (event.submitter?.value === 'cancel') { $('#user-edit-dialog').close(); return; }
+  if (!form.reportValidity()) return;
+  const userId = Number($('#edit-user-id').value);
+  const role = $('#edit-role').value;
+  const payload = {
+    displayName: $('#edit-display-name').value,
+    role,
+    disabled: $('#edit-disabled').checked,
+    agentIds: role === 'user' ? selectedAgentIds('edit-agent-ids') : []
+  };
+  if ($('#edit-password').value) payload.password = $('#edit-password').value;
+  try {
+    await api(`/api/users/${userId}`, { method: 'PATCH', body: JSON.stringify(payload) });
+    $('#user-edit-dialog').close();
     await loadUsers();
   } catch (error) { toast(error.message); }
 });

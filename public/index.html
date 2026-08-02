@@ -27,10 +27,27 @@
         <button data-view="users" data-admin-only>用户管理</button>
         <button data-view="settings" data-system-admin-only>系统设置</button>
       </nav>
-      <div class="account"><strong id="account-name"></strong><span id="account-role"></span></div>
+      <div class="account-shell">
+        <button id="account-button" class="account" type="button" aria-expanded="false">
+          <strong id="account-name"></strong>
+          <span id="account-role"></span>
+        </button>
+        <div id="account-menu" class="account-menu" hidden>
+          <div class="account-menu-row"><span>UID</span><strong id="account-uid">--</strong></div>
+          <button id="open-profile" class="secondary" type="button">账户设置</button>
+          <button id="account-logout-button" class="secondary" type="button">退出登录</button>
+        </div>
+      </div>
     </aside>
     <div class="main-column">
-      <header class="topbar"><h1 id="page-title">网络性能测试</h1><div class="topbar-actions"><a id="version-notice" class="version-badge" target="_blank" rel="noreferrer" hidden></a><button id="logout-button" class="secondary">退出登录</button></div></header>
+      <header class="topbar">
+        <h1 id="page-title">网络性能测试</h1>
+        <div class="topbar-actions">
+          <a id="version-notice" class="version-badge" target="_blank" rel="noreferrer" hidden></a>
+          <button id="logout-button" class="secondary" type="button">退出登录</button>
+        </div>
+      </header>
+      <div id="update-banner" class="update-banner" hidden></div>
 
       <section id="view-tests" class="page">
         <div class="metrics" id="agent-metrics">
@@ -63,11 +80,11 @@
       <section id="view-agents" class="page" hidden>
         <section class="panel"><div class="panel-heading"><h2>Agent 节点</h2><button id="add-agent" class="primary" data-admin-only type="button">添加 Agent</button></div><div class="table-wrap"><table><thead><tr><th>名称</th><th>状态</th><th>平台</th><th>公网 IP / 归属地</th><th>资源</th><th>操作</th></tr></thead><tbody id="agents-body"></tbody></table></div></section>
         <section id="install-panel" class="panel" hidden><div class="panel-heading"><h2>安装 Agent</h2><button id="close-install" class="secondary" type="button">关闭</button></div><div class="install-content"><p>Token 仅在本次生成后展示。Agent 在线时不能重新生成安装命令。</p><label>Docker（Alpine x86-64）<textarea id="install-docker" rows="5" readonly></textarea></label><button class="secondary copy-command" data-target="install-docker">复制 Docker 命令</button><label>一键安装脚本（自动识别 x86-64 / arm64）<textarea id="install-script" rows="4" readonly></textarea></label><button class="secondary copy-command" data-target="install-script">复制脚本命令</button></div></section>
-        <section id="update-agent-panel" class="panel" hidden><div class="panel-heading"><h2>更新 Agent</h2><button id="close-agent-update" class="secondary" type="button">关闭</button></div><div class="install-content"><p>在 Agent 所在主机以 root 身份执行。脚本自动识别原生服务或标准 Docker 容器，保留 Token 与连接配置，校验下载并在失败时回滚。</p><label>Agent 原地更新命令<textarea id="agent-update-command" rows="3" readonly></textarea></label><button class="secondary copy-command" data-target="agent-update-command">复制更新命令</button></div></section>
+        <section id="update-agent-panel" class="panel" hidden><div class="panel-heading"><h2>手动更新 Agent</h2><button id="close-agent-update" class="secondary" type="button">关闭</button></div><div class="install-content"><p>在 Agent 所在主机以 root 身份执行。脚本自动识别原生服务或标准 Docker 容器，保留 Token 与连接配置，校验下载并在失败时回滚。</p><label>Agent 手动更新命令<textarea id="agent-update-command" rows="3" readonly></textarea></label><button class="secondary copy-command" data-target="agent-update-command">复制手动更新命令</button></div></section>
       </section>
 
       <section id="view-users" class="page" hidden data-admin-only>
-        <section class="panel"><div class="panel-heading"><h2>用户与角色</h2><button id="add-user" class="primary" type="button">新增用户</button></div><div class="table-wrap"><table><thead><tr><th>UID</th><th>用户</th><th>角色</th><th>状态</th><th>操作</th></tr></thead><tbody id="users-body"></tbody></table></div></section>
+        <section class="panel"><div class="panel-heading"><h2>用户与角色</h2><button id="add-user" class="primary" type="button">新增用户</button></div><div class="table-wrap"><table><thead><tr><th>UID</th><th>用户</th><th>角色</th><th>Agent 权限</th><th>状态</th><th>操作</th></tr></thead><tbody id="users-body"></tbody></table></div></section>
       </section>
 
       <section id="view-settings" class="page" hidden data-system-admin-only>
@@ -98,7 +115,7 @@
               <div><span>最新版本</span><strong id="latest-version">检测中</strong></div>
               <p id="version-message" class="help">正在从 GitHub 检测最新版本。</p>
               <a id="release-link" target="_blank" rel="noreferrer" hidden>查看 GitHub Release</a>
-              <label>服务器更新命令<textarea rows="2" readonly>cd /opt/netpilot && sh scripts/update.sh</textarea></label>
+              <label>服务器手动更新命令<textarea rows="2" readonly>cd /opt/netpilot && sh scripts/update.sh</textarea></label>
             </div>
           </section>
         </div>
@@ -106,8 +123,74 @@
     </div>
   </div>
 
-  <dialog id="agent-dialog"><form id="agent-form" method="dialog"><div class="dialog-heading"><h2>添加 Agent</h2><button value="cancel" type="submit" formnovalidate class="icon-button" aria-label="关闭">×</button></div><label>Agent 名称<input id="agent-name" required maxlength="80" placeholder="上海边缘节点 01"></label><div class="dialog-actions"><button value="cancel" type="submit" formnovalidate class="secondary">取消</button><button id="create-agent" value="default" class="primary">创建并生成命令</button></div></form></dialog>
-  <dialog id="user-dialog"><form id="user-form" method="dialog"><div class="dialog-heading"><h2>新增用户</h2><button value="cancel" type="submit" formnovalidate class="icon-button" aria-label="关闭">×</button></div><label>显示名称<input id="new-display-name" required maxlength="80"></label><label>用户名<input id="new-username" required pattern="[A-Za-z0-9._-]{3,64}"></label><label>初始密码<input id="new-password" type="password" minlength="12" required autocomplete="new-password"></label><label>角色<select id="new-role"><option value="user">普通用户</option><option value="admin">管理员</option></select></label><label id="new-agent-access-row">授权 Agent<select id="new-agent-ids" multiple size="4"></select></label><div class="dialog-actions"><button value="cancel" type="submit" formnovalidate class="secondary">取消</button><button id="create-user" value="default" class="primary">创建用户</button></div></form></dialog>
+  <dialog id="profile-dialog">
+    <form id="profile-form" method="dialog">
+      <div class="dialog-heading"><h2>账户设置</h2><button value="cancel" type="submit" formnovalidate class="icon-button" aria-label="关闭">×</button></div>
+      <label>UID<input id="profile-uid" readonly></label>
+      <label>用户名<input id="profile-username" readonly></label>
+      <label>显示名称<input id="profile-display-name" required maxlength="80"></label>
+      <label>当前密码<input id="profile-current-password" type="password" autocomplete="current-password" placeholder="修改密码时填写"></label>
+      <label>新密码<input id="profile-new-password" type="password" minlength="12" autocomplete="new-password" placeholder="留空则不修改"></label>
+      <label>确认新密码<input id="profile-confirm-password" type="password" autocomplete="new-password"></label>
+      <div class="dialog-actions"><button value="cancel" type="submit" formnovalidate class="secondary">取消</button><button id="save-profile" value="default" class="primary">保存</button></div>
+    </form>
+  </dialog>
+
+  <dialog id="agent-dialog">
+    <form id="agent-form" method="dialog">
+      <div class="dialog-heading"><h2>添加 Agent</h2><button value="cancel" type="submit" formnovalidate class="icon-button" aria-label="关闭">×</button></div>
+      <label>Agent 名称<input id="agent-name" required maxlength="80" placeholder="上海边缘节点 01"></label>
+      <div class="dialog-actions"><button value="cancel" type="submit" formnovalidate class="secondary">取消</button><button id="create-agent" value="default" class="primary">创建并生成命令</button></div>
+    </form>
+  </dialog>
+
+  <dialog id="user-dialog">
+    <form id="user-form" method="dialog">
+      <div class="dialog-heading"><h2>新增用户</h2><button value="cancel" type="submit" formnovalidate class="icon-button" aria-label="关闭">×</button></div>
+      <label>显示名称<input id="new-display-name" required maxlength="80"></label>
+      <label>用户名<input id="new-username" required pattern="[A-Za-z0-9._-]{3,64}"></label>
+      <label>初始密码<input id="new-password" type="password" minlength="12" required autocomplete="new-password"></label>
+      <label>角色<select id="new-role"><option value="user">普通用户</option><option value="admin">管理员</option></select></label>
+      <div id="new-agent-access-row" class="agent-access-field">
+        <span class="field-label">授权 Agent</span>
+        <div class="agent-picker">
+          <div class="picker-toolbar">
+            <button class="secondary picker-action" data-picker="new-agent-ids" data-action="all" type="button">全选</button>
+            <button class="secondary picker-action" data-picker="new-agent-ids" data-action="invert" type="button">反选</button>
+            <button class="secondary picker-action" data-picker="new-agent-ids" data-action="clear" type="button">清空</button>
+          </div>
+          <div id="new-agent-ids" class="agent-choice-box" role="group" aria-label="授权 Agent"></div>
+        </div>
+      </div>
+      <div class="dialog-actions"><button value="cancel" type="submit" formnovalidate class="secondary">取消</button><button id="create-user" value="default" class="primary">创建用户</button></div>
+    </form>
+  </dialog>
+
+  <dialog id="user-edit-dialog">
+    <form id="user-edit-form" method="dialog">
+      <div class="dialog-heading"><h2>修改用户</h2><button value="cancel" type="submit" formnovalidate class="icon-button" aria-label="关闭">×</button></div>
+      <input id="edit-user-id" type="hidden">
+      <label>UID<input id="edit-uid" readonly></label>
+      <label>用户名<input id="edit-username" readonly></label>
+      <label>显示名称<input id="edit-display-name" required maxlength="80"></label>
+      <label>角色<select id="edit-role"><option value="user">普通用户</option><option value="admin">管理员</option></select></label>
+      <label class="switch-row"><span>禁用用户</span><input id="edit-disabled" type="checkbox"></label>
+      <label>重置密码<input id="edit-password" type="password" minlength="12" autocomplete="new-password" placeholder="留空则不修改"></label>
+      <div id="edit-agent-access-row" class="agent-access-field">
+        <span class="field-label">授权 Agent</span>
+        <div class="agent-picker">
+          <div class="picker-toolbar">
+            <button class="secondary picker-action" data-picker="edit-agent-ids" data-action="all" type="button">全选</button>
+            <button class="secondary picker-action" data-picker="edit-agent-ids" data-action="invert" type="button">反选</button>
+            <button class="secondary picker-action" data-picker="edit-agent-ids" data-action="clear" type="button">清空</button>
+          </div>
+          <div id="edit-agent-ids" class="agent-choice-box" role="group" aria-label="授权 Agent"></div>
+        </div>
+      </div>
+      <div class="dialog-actions"><button value="cancel" type="submit" formnovalidate class="secondary">取消</button><button id="save-user" value="default" class="primary">保存修改</button></div>
+    </form>
+  </dialog>
+
   <div id="toast" role="status" aria-live="polite"></div>
   <script type="module" src="/app.js"></script>
 </body>

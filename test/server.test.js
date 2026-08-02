@@ -38,6 +38,32 @@ async function request(base, path, options = {}, session = '') {
   return { response, body: await response.json() };
 }
 
+function waitForMessage(socket, predicate, timeoutMs, label) {
+  return new Promise((resolvePromise, rejectPromise) => {
+    const timer = setTimeout(() => {
+      cleanup();
+      rejectPromise(new Error(`timed out waiting for ${label}`));
+    }, timeoutMs);
+    const cleanup = () => {
+      clearTimeout(timer);
+      socket.off('message', onMessage);
+      socket.off('error', onError);
+    };
+    const onError = (error) => {
+      cleanup();
+      rejectPromise(error);
+    };
+    const onMessage = (raw) => {
+      const message = JSON.parse(raw.toString());
+      if (!predicate(message)) return;
+      cleanup();
+      resolvePromise(message);
+    };
+    socket.on('message', onMessage);
+    socket.on('error', onError);
+  });
+}
+
 test('security invariants, roles and Agent installation lock', async (t) => {
   const directory = await mkdtemp(join(tmpdir(), 'netpilot-test-'));
   const dbPath = join(directory, 'test.sqlite');
@@ -170,6 +196,28 @@ test('security invariants, roles and Agent installation lock', async (t) => {
   const onlineInstall = await request(base, `/api/admin/agents/${agentID}/install`, { method: 'POST', body: '{}' }, session);
   assert.equal(onlineInstall.response.status, 409);
 
+  const uiSocket = new WebSocket(`ws://127.0.0.1:${port}/ws/ui`, { headers: { cookie: session } });
+  await once(uiSocket, 'open');
+  const updateStartWait = waitForMessage(socket, (message) => message.type === 'agent.update.start', 3000, 'agent.update.start');
+  const autoUpdate = await request(base, `/api/admin/agents/${agentID}/update`, { method: 'POST', body: '{}' }, session);
+  assert.equal(autoUpdate.response.status, 202);
+  assert.equal(autoUpdate.body.update.oldVersion, 'test');
+  const updateStart = await updateStartWait;
+  assert.match(updateStart.taskId, /^update_/);
+  assert.equal(updateStart.payload.scriptUrl, 'https://downloads.example.com/update-agent.sh');
+  assert.equal(updateStart.payload.repo, 'Lorry-San/netpilot');
+  assert.equal(updateStart.payload.githubAccel, 'https://ghproxy.example.com/');
+  const updateDoneWait = waitForMessage(uiSocket, (message) => message.type === 'agent.update' && message.payload?.status === 'success', 3000, 'ui agent.update success');
+  socket.send(JSON.stringify({ type: 'agent.update.started', taskId: updateStart.taskId, payload: { oldVersion: 'test' } }));
+  socket.send(JSON.stringify({ type: 'agent.update.output', taskId: updateStart.taskId, payload: { line: '>>> upgrading test -> v9.9.9' } }));
+  socket.send(JSON.stringify({ type: 'agent.update.done', taskId: updateStart.taskId, payload: { exitCode: 0, oldVersion: 'test', newVersion: 'v9.9.9' } }));
+  const updateDone = await updateDoneWait;
+  assert.equal(updateDone.payload.oldVersion, 'test');
+  assert.equal(updateDone.payload.newVersion, 'v9.9.9');
+  assert.equal(database.prepare('SELECT version FROM agents WHERE id = ?').get(agentID).version, 'v9.9.9');
+  uiSocket.close();
+  await once(uiSocket, 'close');
+
   const newUser = await request(base, '/api/users', { method: 'POST', body: JSON.stringify({ username: 'operator', displayName: 'Operator', password: 'Operator-Password-2026', role: 'user', agentIds: [agentID] }) }, session);
   assert.equal(newUser.response.status, 201);
   assert.equal(newUser.body.user.role, 'user');
@@ -180,10 +228,29 @@ test('security invariants, roles and Agent installation lock', async (t) => {
   const assignedAgents = await request(base, '/api/agents', {}, userSession);
   assert.equal(assignedAgents.response.status, 200);
   assert.deepEqual(assignedAgents.body.agents.map((agent) => agent.id), [agentID]);
+  const badSelfPassword = await request(base, '/api/me', { method: 'PATCH', body: JSON.stringify({ displayName: 'Operator Renamed', currentPassword: 'wrong-password', newPassword: 'Operator-New-Password-2026' }) }, userSession);
+  assert.equal(badSelfPassword.response.status, 403);
+  const selfProfile = await request(base, '/api/me', { method: 'PATCH', body: JSON.stringify({ displayName: 'Operator Renamed', currentPassword: 'Operator-Password-2026', newPassword: 'Operator-New-Password-2026' }) }, userSession);
+  assert.equal(selfProfile.response.status, 200);
+  assert.equal(selfProfile.body.user.displayName, 'Operator Renamed');
+  assert.match(database.prepare('SELECT password_hash FROM users WHERE id = ?').get(newUser.body.user.id).password_hash, /^scrypt\$/);
+  const userDetail = await request(base, `/api/users/${newUser.body.user.id}`, {}, session);
+  assert.equal(userDetail.response.status, 200);
+  assert.deepEqual(userDetail.body.user.agentIds, [agentID]);
+  const clearUserAgents = await request(base, `/api/users/${newUser.body.user.id}`, { method: 'PATCH', body: JSON.stringify({ displayName: 'Operator Limited', role: 'user', disabled: false, agentIds: [] }) }, session);
+  assert.equal(clearUserAgents.response.status, 200);
+  assert.deepEqual(clearUserAgents.body.user.agentIds, []);
+  const assignedAfterClear = await request(base, '/api/agents', {}, userSession);
+  assert.deepEqual(assignedAfterClear.body.agents.map((agent) => agent.id), []);
+  const restoreUserAgents = await request(base, `/api/users/${newUser.body.user.id}`, { method: 'PATCH', body: JSON.stringify({ displayName: 'Operator Limited', role: 'user', disabled: false, agentIds: [agentID] }) }, session);
+  assert.equal(restoreUserAgents.response.status, 200);
+  assert.deepEqual(restoreUserAgents.body.user.agentIds, [agentID]);
   const forbiddenSettings = await request(base, '/api/settings', {}, userSession);
   assert.equal(forbiddenSettings.response.status, 403);
   const forbiddenUpdate = await request(base, `/api/admin/agents/${agentID}/update-command`, { method: 'POST', body: '{}' }, userSession);
   assert.equal(forbiddenUpdate.response.status, 403);
+  const forbiddenAutoUpdate = await request(base, `/api/admin/agents/${agentID}/update`, { method: 'POST', body: '{}' }, userSession);
+  assert.equal(forbiddenAutoUpdate.response.status, 403);
 
   const secondAdmin = await request(base, '/api/users', { method: 'POST', body: JSON.stringify({ username: 'backup-admin', displayName: 'Backup Admin', password: 'Backup-Admin-Password-2026', role: 'admin' }) }, session);
   assert.equal(secondAdmin.response.status, 201);
@@ -194,7 +261,7 @@ test('security invariants, roles and Agent installation lock', async (t) => {
 
   const version = await request(base, '/api/system/version', {}, session);
   assert.equal(version.response.status, 200);
-  assert.equal(version.body.current, '0.1.4');
+  assert.equal(version.body.current, '0.1.5');
   assert.ok(Object.hasOwn(version.body, 'updateAvailable'));
 
   socket.close();

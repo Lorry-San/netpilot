@@ -51,7 +51,15 @@ test('static assets and installer script are served', async (t) => {
   const indexHtml = await index.text();
   assert.match(indexHtml, /password/i);
   assert.doesNotMatch(indexHtml, /id="login-username"[^>]*value=/);
-  assert.equal((indexHtml.match(/formnovalidate/g) || []).length, 4);
+  assert.equal((indexHtml.match(/formnovalidate/g) || []).length, 8);
+  assert.match(indexHtml, /id="account-button"/);
+  assert.match(indexHtml, /id="account-menu"/);
+  assert.match(indexHtml, /id="profile-dialog"/);
+  assert.match(indexHtml, /id="user-edit-dialog"/);
+  assert.match(indexHtml, /id="update-banner"/);
+  assert.match(indexHtml, /data-action="all"/);
+  assert.match(indexHtml, /data-action="invert"/);
+  assert.match(indexHtml, /data-action="clear"/);
   assert.match(indexHtml, /id="view-settings"[^>]*data-system-admin-only/);
   assert.match(indexHtml, /id="setting-agent-ws"/);
   assert.match(indexHtml, /id="setting-script-base"/);
@@ -73,6 +81,10 @@ test('static assets and installer script are served', async (t) => {
   assert.match(appScript, /loadTests\(\{ preserveActiveOutput: true \}\)/);
   assert.match(appScript, /preserveActiveOutput && active\.status === 'running'/);
   assert.match(appScript, /output\.append\(document\.createTextNode/);
+  assert.match(appScript, /\/api\/me/);
+  assert.match(appScript, /agent\.update/);
+  assert.match(appScript, /\/update`/);
+  assert.match(appScript, /selectedAgentIds/);
 
   const installer = await fetch(`${base}/install-agent.sh`);
   assert.equal(installer.status, 200);

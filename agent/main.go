@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net/http"
 	"net/url"
 	"os"
 	"os/exec"
@@ -51,6 +52,13 @@ type taskParams struct {
 	Bandwidth string `json:"bandwidth"`
 }
 
+type updateParams struct {
+	ScriptURL   string `json:"scriptUrl"`
+	Repo        string `json:"repo"`
+	GithubAccel string `json:"githubAccel"`
+	OldVersion  string `json:"oldVersion"`
+}
+
 type client struct {
 	conn       *websocket.Conn
 	writeMu    sync.Mutex
@@ -72,6 +80,12 @@ type netSample struct {
 
 var bitratePattern = regexp.MustCompile(`([0-9]+(?:\.[0-9]+)?)\s+([KMG])bits/sec`)
 var intervalPattern = regexp.MustCompile(`([0-9]+(?:\.[0-9]+)?)-([0-9]+(?:\.[0-9]+)?)\s+sec`)
+var updateVersionPatterns = []*regexp.Regexp{
+	regexp.MustCompile(`updated to\s+(v?[0-9][0-9A-Za-z._-]*)`),
+	regexp.MustCompile(`up to date\s+\((v?[0-9][0-9A-Za-z._-]*)\)`),
+	regexp.MustCompile(`->\s*(v?[0-9][0-9A-Za-z._-]*)`),
+}
+var safeUnitPattern = regexp.MustCompile(`[^A-Za-z0-9_.-]+`)
 
 func getenv(key, fallback string) string {
 	if value := strings.TrimSpace(os.Getenv(key)); value != "" {
@@ -159,6 +173,131 @@ func normalizeTask(raw map[string]any) (taskParams, error) {
 		}
 	}
 	return task, nil
+}
+
+func normalizeUpdate(raw map[string]any) (updateParams, error) {
+	data, err := json.Marshal(raw)
+	if err != nil {
+		return updateParams{}, err
+	}
+	var params updateParams
+	if err := json.Unmarshal(data, &params); err != nil {
+		return params, err
+	}
+	parsed, err := url.Parse(strings.TrimSpace(params.ScriptURL))
+	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" || parsed.User != nil {
+		return params, errors.New("update script URL must be a valid http:// or https:// URL")
+	}
+	params.ScriptURL = parsed.String()
+	params.Repo = strings.TrimSpace(params.Repo)
+	if params.Repo == "" {
+		params.Repo = "Lorry-San/netpilot"
+	}
+	if !regexp.MustCompile(`^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$`).MatchString(params.Repo) {
+		return params, errors.New("invalid GitHub repository")
+	}
+	params.GithubAccel = strings.TrimSpace(params.GithubAccel)
+	if params.GithubAccel != "" {
+		accel, err := url.Parse(params.GithubAccel)
+		if err != nil || (accel.Scheme != "http" && accel.Scheme != "https") || accel.Host == "" || accel.User != nil {
+			return params, errors.New("invalid GitHub acceleration URL")
+		}
+		params.GithubAccel = accel.String()
+	}
+	return params, nil
+}
+
+func downloadUpdateScript(ctx context.Context, scriptURL string) (string, error) {
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, scriptURL, nil)
+	if err != nil {
+		return "", err
+	}
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		return "", err
+	}
+	defer response.Body.Close()
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		return "", fmt.Errorf("update script download failed with HTTP %d", response.StatusCode)
+	}
+	var file *os.File
+	if os.Geteuid() == 0 {
+		file, err = os.CreateTemp("/run", "netpilot-agent-update-*.sh")
+	}
+	if file == nil {
+		file, err = os.CreateTemp("", "netpilot-agent-update-*.sh")
+	}
+	if err != nil {
+		return "", err
+	}
+	path := file.Name()
+	defer file.Close()
+	written, err := io.Copy(file, io.LimitReader(response.Body, 2*1024*1024+1))
+	if err != nil {
+		_ = os.Remove(path)
+		return "", err
+	}
+	if written > 2*1024*1024 {
+		_ = os.Remove(path)
+		return "", errors.New("update script is too large")
+	}
+	if err := os.Chmod(path, 0700); err != nil {
+		_ = os.Remove(path)
+		return "", err
+	}
+	return path, nil
+}
+
+func commandExists(name string) bool {
+	_, err := exec.LookPath(name)
+	return err == nil
+}
+
+func systemdManagedAgent() bool {
+	if os.Geteuid() != 0 || !commandExists("systemd-run") || !commandExists("systemctl") {
+		return false
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	return exec.CommandContext(ctx, "systemctl", "cat", "netpilot-agent.service").Run() == nil
+}
+
+func updateEnvironment(params updateParams) []string {
+	return append(os.Environ(),
+		"NETPILOT_REPO="+params.Repo,
+		"NETPILOT_GITHUB_ACCEL="+params.GithubAccel,
+		"NETPILOT_UPDATE_MODE=auto",
+	)
+}
+
+func updaterCommand(ctx context.Context, updateID, scriptPath string, params updateParams) *exec.Cmd {
+	if systemdManagedAgent() {
+		unit := "netpilot-agent-update-" + safeUnitPattern.ReplaceAllString(updateID, "-")
+		args := []string{
+			"--wait",
+			"--pipe",
+			"--collect",
+			"--unit", unit,
+			"--setenv=NETPILOT_REPO=" + params.Repo,
+			"--setenv=NETPILOT_GITHUB_ACCEL=" + params.GithubAccel,
+			"--setenv=NETPILOT_UPDATE_MODE=auto",
+			"/bin/sh", scriptPath,
+		}
+		return exec.CommandContext(ctx, "systemd-run", args...)
+	}
+	cmd := exec.CommandContext(ctx, "sh", scriptPath)
+	cmd.Env = updateEnvironment(params)
+	return cmd
+}
+
+func updateVersionFromLine(line string) string {
+	for _, pattern := range updateVersionPatterns {
+		match := pattern.FindStringSubmatch(line)
+		if len(match) == 2 {
+			return match[1]
+		}
+	}
+	return ""
 }
 
 func iperfArgs(task taskParams) []string {
@@ -259,6 +398,94 @@ func executeTask(parent context.Context, c *client, taskID string, raw map[strin
 		}
 	}
 	_ = c.send(message{Type: "task.done", TaskID: taskID, Payload: map[string]any{"exitCode": exitCode, "durationMs": time.Since(started).Milliseconds()}})
+}
+
+func streamUpdateOutput(c *client, updateID string, reader io.Reader, latestVersion *string, versionMu *sync.Mutex, wg *sync.WaitGroup) {
+	defer wg.Done()
+	scanner := bufio.NewScanner(reader)
+	scanner.Buffer(make([]byte, 64*1024), 1024*1024)
+	for scanner.Scan() {
+		line := scanner.Text()
+		_ = c.send(message{Type: "agent.update.output", TaskID: updateID, Payload: map[string]any{"line": line}})
+		if parsed := updateVersionFromLine(line); parsed != "" {
+			versionMu.Lock()
+			*latestVersion = parsed
+			versionMu.Unlock()
+		}
+	}
+}
+
+func executeUpdate(parent context.Context, c *client, updateID string, raw map[string]any) {
+	params, err := normalizeUpdate(raw)
+	oldVersion := version
+	if params.OldVersion != "" {
+		oldVersion = params.OldVersion
+	}
+	if err != nil {
+		_ = c.send(message{Type: "agent.update.done", TaskID: updateID, Payload: map[string]any{"exitCode": 1, "oldVersion": oldVersion, "newVersion": oldVersion, "error": err.Error()}})
+		return
+	}
+	ctx, cancel := context.WithTimeout(parent, 5*time.Minute)
+	if !c.setTask(updateID, cancel) {
+		cancel()
+		_ = c.send(message{Type: "agent.update.done", TaskID: updateID, Payload: map[string]any{"exitCode": 1, "oldVersion": oldVersion, "newVersion": oldVersion, "error": "agent is already running a task"}})
+		return
+	}
+	defer func() {
+		cancel()
+		c.finishTask(updateID)
+	}()
+
+	_ = c.send(message{Type: "agent.update.started", TaskID: updateID, Payload: map[string]any{"oldVersion": oldVersion}})
+	scriptPath, err := downloadUpdateScript(ctx, params.ScriptURL)
+	if err != nil {
+		_ = c.send(message{Type: "agent.update.done", TaskID: updateID, Payload: map[string]any{"exitCode": 1, "oldVersion": oldVersion, "newVersion": oldVersion, "error": err.Error()}})
+		return
+	}
+	defer os.Remove(scriptPath)
+
+	cmd := updaterCommand(ctx, updateID, scriptPath, params)
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		_ = c.send(message{Type: "agent.update.done", TaskID: updateID, Payload: map[string]any{"exitCode": 1, "oldVersion": oldVersion, "newVersion": oldVersion, "error": err.Error()}})
+		return
+	}
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		_ = c.send(message{Type: "agent.update.done", TaskID: updateID, Payload: map[string]any{"exitCode": 1, "oldVersion": oldVersion, "newVersion": oldVersion, "error": err.Error()}})
+		return
+	}
+	if err := cmd.Start(); err != nil {
+		_ = c.send(message{Type: "agent.update.done", TaskID: updateID, Payload: map[string]any{"exitCode": 1, "oldVersion": oldVersion, "newVersion": oldVersion, "error": err.Error()}})
+		return
+	}
+	latestVersion := ""
+	var versionMu sync.Mutex
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go streamUpdateOutput(c, updateID, stdout, &latestVersion, &versionMu, &wg)
+	go streamUpdateOutput(c, updateID, stderr, &latestVersion, &versionMu, &wg)
+	err = cmd.Wait()
+	wg.Wait()
+	exitCode := 0
+	if err != nil {
+		exitCode = -1
+		var exitError *exec.ExitError
+		if errors.As(err, &exitError) {
+			exitCode = exitError.ExitCode()
+		}
+	}
+	versionMu.Lock()
+	newVersion := latestVersion
+	versionMu.Unlock()
+	if newVersion == "" {
+		newVersion = oldVersion
+	}
+	errorText := ""
+	if err != nil {
+		errorText = err.Error()
+	}
+	_ = c.send(message{Type: "agent.update.done", TaskID: updateID, Payload: map[string]any{"exitCode": exitCode, "oldVersion": oldVersion, "newVersion": newVersion, "error": errorText}})
 }
 
 func readCPU() (cpuSample, error) {
@@ -434,6 +661,8 @@ func connect(ctx context.Context, cfg config) error {
 			go executeTask(connectionCtx, c, incoming.TaskID, incoming.Payload)
 		case "task.cancel":
 			c.cancel(incoming.TaskID)
+		case "agent.update.start":
+			go executeUpdate(connectionCtx, c, incoming.TaskID, incoming.Payload)
 		}
 	}
 }

@@ -481,6 +481,17 @@ export function createTest(user, body = {}) {
   return get('SELECT * FROM tests WHERE id = ?', id);
 }
 
+export function cancelTest(user, taskId) {
+  const task = get('SELECT * FROM tests WHERE id = ?', String(taskId || ''));
+  if (!task || (user.role !== 'admin' && task.user_id !== user.id)) throw Object.assign(new Error('任务不存在'), { status: 404 });
+  if (['completed', 'failed', 'cancelled', 'timeout'].includes(task.status)) return taskView(task);
+  sendAgent(task.agent_id, { type: 'task.cancel', taskId: task.id });
+  run('UPDATE tests SET status = \'cancelled\', finished_at = ? WHERE id = ?', now(), task.id);
+  run('UPDATE agents SET status = \'online\', updated_at = ? WHERE id = ?', now(), task.agent_id);
+  emitTaskComplete(task.id);
+  return taskView(get('SELECT * FROM tests WHERE id = ?', task.id));
+}
+
 const taskCompletionHooks = new Set();
 export function onTaskComplete(hook) {
   taskCompletionHooks.add(hook);
@@ -531,12 +542,20 @@ function handleAgentMessage(socket, agentId, message) {
     run('INSERT INTO test_metrics (test_id, second, send_mbps, recv_mbps, cpu_percent, memory_percent, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)', taskId, Number(p.second || 0), p.sendMbps ?? null, p.recvMbps ?? null, p.cpuPercent ?? null, p.memoryPercent ?? null, now());
     broadcastTask(task, { type, taskId, payload: p });
   } else if (type === 'task.done') {
+    if (task.status === 'cancelled') {
+      run('UPDATE agents SET status = \'online\', updated_at = ? WHERE id = ?', now(), agentId);
+      return;
+    }
     const status = message.payload?.exitCode === 0 ? 'completed' : 'failed';
     run('UPDATE tests SET status = ?, finished_at = ?, result_json = ? WHERE id = ?', status, now(), JSON.stringify(message.payload || {}), taskId);
     run('UPDATE agents SET status = \'online\', updated_at = ? WHERE id = ?', now(), agentId);
     broadcastTask(task, { type, taskId, payload: { ...(message.payload || {}), status } });
     emitTaskComplete(taskId);
   } else if (type === 'task.error') {
+    if (task.status === 'cancelled') {
+      run('UPDATE agents SET status = \'online\', updated_at = ? WHERE id = ?', now(), agentId);
+      return;
+    }
     run('UPDATE tests SET status = \'failed\', finished_at = ?, result_json = ? WHERE id = ?', now(), JSON.stringify(message.payload || {}), taskId);
     run('UPDATE agents SET status = \'online\', updated_at = ? WHERE id = ?', now(), agentId);
     broadcastTask(task, { type, taskId, payload: { ...(message.payload || {}), status: 'failed' } });
@@ -730,14 +749,11 @@ async function handleApi(req, res, pathname) {
   }
   const testCancel = pathname.match(/^\/api\/tests\/([^/]+)\/cancel$/);
   if (req.method === 'POST' && testCancel) {
-    const task = get('SELECT * FROM tests WHERE id = ?', testCancel[1]);
-    if (!task || (user.role !== 'admin' && task.user_id !== user.id)) return json(res, 404, { error: '任务不存在' });
-    if (['completed', 'failed', 'cancelled', 'timeout'].includes(task.status)) return json(res, 200, { test: taskView(task) });
-    sendAgent(task.agent_id, { type: 'task.cancel', taskId: task.id });
-    run('UPDATE tests SET status = \'cancelled\', finished_at = ? WHERE id = ?', now(), task.id);
-    run('UPDATE agents SET status = \'online\', updated_at = ? WHERE id = ?', now(), task.agent_id);
-    emitTaskComplete(task.id);
-    return json(res, 200, { test: taskView(get('SELECT * FROM tests WHERE id = ?', task.id)) });
+    try {
+      return json(res, 200, { test: cancelTest(user, testCancel[1]) });
+    } catch (error) {
+      return json(res, error.status || 500, { error: error.status ? error.message : 'Internal server error' });
+    }
   }
   if (req.method === 'GET' && pathname === '/api/users') {
     requireAdmin(user);
@@ -948,6 +964,7 @@ globalThis.netpilotServerApi = {
   hashToken,
   getSettings,
   createTest,
+  cancelTest,
   onTaskComplete,
   audit
 };

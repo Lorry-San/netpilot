@@ -35,10 +35,10 @@ async function safeCall(method, body) {
   try { return await call(method, body); } catch (error) { console.error(`[netpilot] telegram ${method}:`, error.message); return null; }
 }
 
-async function upload(method, fields, filename, bytes, contentType) {
+async function upload(method, fields, fileField, filename, bytes, contentType) {
   const form = new FormData();
   for (const [key, value] of Object.entries(fields)) form.set(key, String(value));
-  form.set('photo', new Blob([bytes], { type: contentType }), filename);
+  form.set(fileField, new Blob([bytes], { type: contentType }), filename);
   const response = await fetch(telegramUrl(method), { method: 'POST', body: form, signal: AbortSignal.timeout(45000) });
   const result = await response.json().catch(() => ({}));
   if (!response.ok || !result.ok) throw new Error(result.description || `Telegram API ${response.status}`);
@@ -118,38 +118,91 @@ function selectionKeyboard(test) {
   return { inline_keyboard: rows };
 }
 
-function chartSvg(metrics = []) {
-  const width = 720;
-  const height = 280;
-  const left = 58;
-  const top = 24;
-  const plotW = 625;
-  const plotH = 195;
-  const max = Math.max(100, ...metrics.flatMap((m) => [Number(m.sendMbps || 0), Number(m.recvMbps || 0)]));
-  const maxSecond = Math.max(1, ...metrics.map((m) => Number(m.second || 0)));
-  const point = (key, index, metric) => {
-    const second = Number(metric.second || index);
-    const x = left + (second / maxSecond) * plotW;
-    const y = top + plotH - (Number(metric[key] || 0) / max) * plotH;
-    return `${x.toFixed(1)},${y.toFixed(1)}`;
-  };
-  const send = metrics.map((m, i) => point('sendMbps', i, m)).join(' ');
-  const recv = metrics.map((m, i) => point('recvMbps', i, m)).join(' ');
-  const grid = Array.from({ length: 5 }, (_, i) => {
-    const y = top + (plotH * i) / 4;
-    const value = Math.round(max - (max * i) / 4);
-    return `<line x1="${left}" y1="${y}" x2="${left + plotW}" y2="${y}" stroke="#ccd6dc"/><text x="${left - 8}" y="${y + 4}" text-anchor="end" font-size="11" fill="#53616b">${value}</text>`;
+function chartSvg(metrics = [], options = {}) {
+  const rows = metrics
+    .map((metric, index) => ({
+      second: Number.isFinite(Number(metric.second)) ? Number(metric.second) : index + 1,
+      sendMbps: Number.isFinite(Number(metric.sendMbps)) ? Number(metric.sendMbps) : null,
+      recvMbps: Number.isFinite(Number(metric.recvMbps)) ? Number(metric.recvMbps) : null
+    }))
+    .sort((a, b) => a.second - b.second);
+  const width = Math.max(960, Math.min(2400, 210 + rows.length * 72));
+  const height = 520;
+  const left = 92;
+  const right = 38;
+  const top = 72;
+  const bottom = 82;
+  const plotW = width - left - right;
+  const plotH = height - top - bottom;
+  const values = rows.flatMap((row) => [row.sendMbps, row.recvMbps]).filter((value) => value !== null && value >= 0);
+  const rawMax = Math.max(1, ...values);
+  const magnitude = 10 ** Math.floor(Math.log10(rawMax * 1.15));
+  const scaled = (rawMax * 1.15) / magnitude;
+  const niceFactor = [1, 1.25, 1.5, 2, 2.5, 5, 10].find((factor) => scaled <= factor) || 10;
+  const maxRate = niceFactor * magnitude;
+  const minSecond = Math.min(0, ...rows.map((row) => row.second));
+  const maxSecond = Math.max(1, ...rows.map((row) => row.second));
+  const xFor = (second) => left + ((second - minSecond) / Math.max(1, maxSecond - minSecond)) * plotW;
+  const yFor = (value) => top + plotH - (Math.max(0, value || 0) / maxRate) * plotH;
+  const formatRate = (value) => value >= 1000 ? value.toFixed(0) : value >= 100 ? value.toFixed(1) : value.toFixed(2);
+  const sameSeries = rows.length > 0 && rows.every((row) => row.sendMbps === null || row.recvMbps === null || Math.abs(row.sendMbps - row.recvMbps) < 0.005);
+  const available = [
+    { key: 'sendMbps', label: sameSeries ? 'Rate' : 'Send', color: '#079a87' },
+    { key: 'recvMbps', label: 'Receive', color: '#226fb3' }
+  ].filter((series, index) => rows.some((row) => row[series.key] !== null) && !(sameSeries && index === 1));
+  const yTicks = Array.from({ length: 6 }, (_, index) => {
+    const value = (maxRate * index) / 5;
+    const y = top + plotH - (plotH * index) / 5;
+    return `<line x1="${left}" y1="${y}" x2="${left + plotW}" y2="${y}" stroke="#d8e0e5" stroke-width="1"/><line x1="${left - 6}" y1="${y}" x2="${left}" y2="${y}" stroke="#33434d" stroke-width="2"/><text x="${left - 12}" y="${y + 5}" text-anchor="end" font-size="14" fill="#33434d">${formatRate(value)}</text>`;
   }).join('');
-  return `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}"><rect width="100%" height="100%" fill="#fff"/><text x="12" y="16" font-family="sans-serif" font-size="11" fill="#53616b">Mbps</text>${grid}<line x1="${left}" y1="${top + plotH}" x2="${left + plotW}" y2="${top + plotH}" stroke="#53616b"/><line x1="${left}" y1="${top}" x2="${left}" y2="${top + plotH}" stroke="#53616b"/><text x="${left + plotW}" y="${top + plotH + 30}" text-anchor="end" font-family="sans-serif" font-size="11" fill="#53616b">Time (s)</text><polyline fill="none" stroke="#12a594" stroke-width="3" points="${send}"/><polyline fill="none" stroke="#2379bd" stroke-width="2" points="${recv}"/><text x="${width - 145}" y="18" font-family="sans-serif" font-size="11" fill="#12a594">Send</text><text x="${width - 72}" y="18" font-family="sans-serif" font-size="11" fill="#2379bd">Receive</text></svg>`;
+  const tickRows = rows.length <= 16 ? rows : rows.filter((_, index) => index % Math.ceil(rows.length / 12) === 0 || index === rows.length - 1);
+  const xTicks = tickRows.map((row) => {
+    const x = xFor(row.second);
+    return `<line x1="${x}" y1="${top + plotH}" x2="${x}" y2="${top + plotH + 7}" stroke="#33434d" stroke-width="2"/><text x="${x}" y="${top + plotH + 27}" text-anchor="middle" font-size="14" fill="#33434d">${row.second.toFixed(row.second % 1 ? 1 : 0)}</text>`;
+  }).join('');
+  const renderedSeries = available.map((series, seriesIndex) => {
+    const points = rows.filter((row) => row[series.key] !== null).map((row) => `${xFor(row.second).toFixed(1)},${yFor(row[series.key]).toFixed(1)}`).join(' ');
+    const marks = rows.filter((row) => row[series.key] !== null).map((row, pointIndex) => {
+      const x = xFor(row.second);
+      const y = yFor(row[series.key]);
+      const labelY = Math.max(top + 13, Math.min(top + plotH - 8, y + (seriesIndex === 0 ? (pointIndex % 2 ? 22 : -12) : 22)));
+      return `<circle cx="${x}" cy="${y}" r="4.5" fill="#fff" stroke="${series.color}" stroke-width="3"/><text x="${x}" y="${labelY}" text-anchor="middle" font-size="13" font-weight="600" fill="${series.color}" stroke="#fff" stroke-width="4" paint-order="stroke">${formatRate(row[series.key])}</text>`;
+    }).join('');
+    return `<polyline fill="none" stroke="${series.color}" stroke-width="3" stroke-linejoin="round" stroke-linecap="round" points="${points}"/>${marks}`;
+  }).join('');
+  const legend = available.map((series, index) => `<line x1="${left + index * 118}" y1="46" x2="${left + 28 + index * 118}" y2="46" stroke="${series.color}" stroke-width="4"/><text x="${left + 36 + index * 118}" y="51" font-size="14" fill="#33434d">${series.label}</text>`).join('');
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}"><rect width="100%" height="100%" fill="#fff"/><text x="${left}" y="27" font-family="sans-serif" font-size="20" font-weight="700" fill="#17242c">${esc(options.title || 'NetPilot speed / time')}</text><g font-family="sans-serif">${legend}${yTicks}${xTicks}<line x1="${left}" y1="${top}" x2="${left}" y2="${top + plotH}" stroke="#33434d" stroke-width="2"/><line x1="${left}" y1="${top + plotH}" x2="${left + plotW}" y2="${top + plotH}" stroke="#33434d" stroke-width="2"/><text x="22" y="${top + plotH / 2}" text-anchor="middle" font-size="16" font-weight="600" fill="#17242c" transform="rotate(-90 22 ${top + plotH / 2})">Speed (Mbps)</text><text x="${left + plotW / 2}" y="${height - 18}" text-anchor="middle" font-size="16" font-weight="600" fill="#17242c">Time (s)</text>${renderedSeries}</g></svg>`;
 }
 
-async function sendChart(chatId, metrics) {
-  const svg = chartSvg(metrics);
+function elapsedMs(start, end = Date.now()) {
+  const startMs = new Date(start).getTime();
+  const endMs = new Date(end).getTime();
+  return Number.isFinite(startMs) && Number.isFinite(endMs) ? Math.max(0, endMs - startMs) : 0;
+}
+
+function formatDuration(milliseconds) {
+  const seconds = Math.max(0, Math.round(milliseconds / 1000));
+  if (seconds < 60) return `${seconds}s`;
+  return `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
+}
+
+function formatTimestamp(value) {
+  if (!value) return '-';
+  return new Intl.DateTimeFormat('zh-CN', { timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false }).format(new Date(value)).replaceAll('/', '-');
+}
+
+async function sendChart(chatId, view, batchStartedAt) {
+  if (!view.metrics.length) return false;
+  const svg = chartSvg(view.metrics, { title: `${view.agentName} - ${view.target}:${view.port}` });
   try {
-    const png = new Resvg(svg, { fitTo: { mode: 'width', value: 1440 } }).render().asPng();
-    await upload('sendPhoto', { chat_id: chatId, caption: '速度 / 时间曲线' }, 'netpilot-chart.png', png, 'image/png');
+    const png = new Resvg(svg, { fitTo: { mode: 'width', value: Math.min(2400, Math.max(1440, view.metrics.length * 100)) } }).render().asPng();
+    const timestamp = new Date(view.finishedAt || Date.now()).toISOString().replaceAll(':', '-').replace(/\.\d{3}Z$/, 'Z');
+    const caption = `速度 / 时间曲线\nAgent：${view.agentName}\n测试耗时：${formatDuration(elapsedMs(view.createdAt, view.finishedAt))}\n当前总耗时：${formatDuration(elapsedMs(batchStartedAt, view.finishedAt || Date.now()))}`;
+    await upload('sendDocument', { chat_id: chatId, caption }, 'document', `netpilot-${timestamp}.png`, png, 'image/png');
+    return true;
   } catch (error) {
     console.error('[netpilot] telegram chart:', error.message);
+    return false;
   }
 }
 
@@ -158,8 +211,9 @@ function resultText(view) {
   const last = view.metrics.at(-1);
   const rate = Number(last?.sendMbps || last?.recvMbps || 0).toFixed(2);
   const raw = view.output.map((line) => line.line).join('\n');
-  const tail = raw.length > 3500 ? `…${raw.slice(-3500)}` : raw;
-  return `测试${status}\nAgent：${esc(view.agentName)}\n目标：${esc(view.target)}:${view.port}\n协议：${view.protocol.toUpperCase()}${view.reverse ? ' -R' : ''}\n时长：${view.duration}s\n末速：${rate} Mbps\n\n<blockquote expandable>${esc(tail || '无原始输出')}</blockquote>`;
+  const tail = raw.length > 3200 ? `…${raw.slice(-3200)}` : raw;
+  const duration = formatDuration(elapsedMs(view.createdAt, view.finishedAt));
+  return `测试${status}\nAgent：${esc(view.agentName)}\n目标：${esc(view.target)}:${view.port}\n协议：${view.protocol.toUpperCase()}${view.reverse ? ' -R' : ''}\n设定时长：${view.duration}s\n测试耗时：${duration}\n完成时间：${formatTimestamp(view.finishedAt)}\n末速：${rate} Mbps\n\n<blockquote expandable>${esc(tail || '无原始输出')}</blockquote>`;
 }
 
 async function sendHelp(chatId) {
@@ -188,51 +242,118 @@ async function startTestFromTelegram(chatId, telegramId, user, args) {
   if (!test.messageId) activeTests.delete(id);
 }
 
+function progressKeyboard(test) {
+  return { inline_keyboard: [
+    [{ text: '❌ 实时渲染', callback_data: `tg:${test.id}:refresh:${test.telegramId}` }],
+    [{ text: '🔴 中止测试', callback_data: `tg:${test.id}:stop:${test.telegramId}` }]
+  ] };
+}
+
+function processedCount(test) {
+  return test.results.length + test.errors.length;
+}
+
+function progressText(test) {
+  const processed = processedCount(test);
+  const total = test.selectedAgents.length;
+  if (!test.currentTaskId || !test.currentAgent) {
+    return `🎯 任务提交成功，正在处理……\n任务：${test.target}:${test.port}\n已选项：${total}\n\n等待下一个 Agent……`;
+  }
+  const latest = db.get('SELECT second FROM test_metrics WHERE test_id = ? ORDER BY id DESC LIMIT 1', test.currentTaskId);
+  const outputCount = Number(db.get('SELECT COUNT(*) AS count FROM test_output WHERE test_id = ?', test.currentTaskId)?.count || 0);
+  const estimatedSecond = Math.min(test.duration, Math.max(Number(latest?.second || 0), elapsedMs(test.currentStartedAt) / 1000));
+  const percent = Math.min(99, Math.max(0, (estimatedSecond / test.duration) * 100));
+  const filled = Math.min(12, Math.floor((percent / 100) * 12));
+  const bar = `${'█'.repeat(filled)}${'░'.repeat(12 - filled)}`;
+  return `🎯 任务提交成功，正在处理……\n任务：${test.target}:${test.port}\n已选项：${total}\n\n📡 后端：${test.currentAgent.name}\n⌛ 连通性测试进行中……\n[${bar}]\n\n当前进度：${percent.toFixed(1)}% [${Math.min(test.duration, Math.floor(estimatedSecond))}/${test.duration}s]\nAgent 进度：${processed + 1}/${total}\n原始输出：${outputCount} 行\n总耗时：${formatDuration(elapsedMs(test.startedAt))}`;
+}
+
+async function renderProgress(test, force = false) {
+  if (test.state !== 'running') return;
+  const text = progressText(test);
+  if (!force && text === test.lastProgressText) return;
+  test.lastProgressText = text;
+  await safeCall('editMessageText', { chat_id: test.chatId, message_id: test.messageId, text, reply_markup: progressKeyboard(test) });
+}
+
+async function finalizeBatch(test) {
+  if (test.state === 'finished') return;
+  test.state = 'finished';
+  clearInterval(test.timer);
+  const totalElapsed = elapsedMs(test.startedAt);
+  const testElapsed = test.results.reduce((sum, item) => sum + item.elapsed, 0);
+  const successful = test.results.filter((item) => item.status === 'completed').length;
+  const failed = test.results.length - successful + test.errors.length;
+  const title = test.stopRequested ? '测试已中止' : '全部测试已结束';
+  const errorText = test.errors.length ? `\n未完成：${test.errors.map((item) => `${item.agent.name}（${item.error}）`).join('；').slice(0, 2500)}` : '';
+  await safeCall('editMessageText', {
+    chat_id: test.chatId,
+    message_id: test.messageId,
+    text: `${title}\n完成：${processedCount(test)}/${test.selectedAgents.length}\n成功：${successful}，失败/取消：${failed}\n⏱ 测试耗时：${formatDuration(testElapsed)}\n⏱ 总体耗时：${formatDuration(totalElapsed)}\n完成时间：${formatTimestamp(Date.now())}${errorText}`
+  });
+  activeTests.delete(test.id);
+}
+
+async function startNextAgent(test) {
+  if (test.stopRequested || test.state !== 'running') return finalizeBatch(test);
+  while (test.pendingAgents.length) {
+    const agent = test.pendingAgents.shift();
+    test.currentAgent = agent;
+    test.currentStartedAt = Date.now();
+    try {
+      const task = api.createTest(test.user, { agentId: agent.id, target: test.target, port: test.port, parallel: test.parallel, duration: test.duration, protocol: 'tcp', reverse: true });
+      test.currentTaskId = task.id;
+      test.taskIds.add(task.id);
+      api.audit(test.user.id, 'test.create.telegram', task.id, { agentId: agent.id, target: test.target, chatId: test.chatId, serialPosition: processedCount(test) + 1 });
+      await renderProgress(test, true);
+      return;
+    } catch (error) {
+      test.errors.push({ agent, error: error.message });
+      test.currentAgent = null;
+      test.currentTaskId = null;
+    }
+  }
+  await finalizeBatch(test);
+}
+
 async function finishTest(test) {
+  if (test.state === 'running') {
+    await safeCall('answerCallbackQuery', { callback_query_id: test.queryId, text: '任务已经开始' });
+    return;
+  }
   if (!test.selected.size) {
     await safeCall('answerCallbackQuery', { callback_query_id: test.queryId, text: '请至少选择一个 Agent', show_alert: true });
     return;
   }
-  const created = [];
-  const errors = [];
-  for (const agentId of test.selected) {
-    try {
-      const task = api.createTest(test.user, { agentId, target: test.target, port: test.port, parallel: test.parallel, duration: test.duration, protocol: 'tcp', reverse: true });
-      created.push(task);
-      api.audit(test.user.id, 'test.create.telegram', task.id, { agentId, target: test.target, chatId: test.chatId });
-    } catch (error) {
-      errors.push(`${test.agents.find((agent) => agent.id === agentId)?.name || agentId}: ${error.message}`);
-    }
-  }
-  if (!created.length) {
-    await safeCall('answerCallbackQuery', { callback_query_id: test.queryId, text: errors.join('\n').slice(0, 180), show_alert: true });
-    return;
-  }
-  test.taskIds = new Set(created.map((task) => task.id));
-  test.completedTaskIds = new Set();
-  const names = created.map((task) => test.agents.find((agent) => agent.id === task.agent_id)?.name || task.agent_id);
-  await safeCall('editMessageText', { chat_id: test.chatId, message_id: test.messageId, text: `测试已开始：${test.target}:${test.port}\nAgent：${esc(names.join('、'))}\n运行中…${errors.length ? `\n未启动：${esc(errors.join('；'))}` : ''}`, parse_mode: 'HTML' });
-  const timer = setInterval(async () => {
-    const running = [...test.taskIds].filter((taskId) => !test.completedTaskIds.has(taskId));
-    if (!running.length) return;
-    const outputLines = running.reduce((sum, taskId) => sum + Number(db.get('SELECT COUNT(*) AS count FROM test_output WHERE test_id = ?', taskId)?.count || 0), 0);
-    await safeCall('editMessageText', { chat_id: test.chatId, message_id: test.messageId, text: `测试运行中：${test.target}:${test.port}\nAgent：${names.join('、')}\n进度：${test.completedTaskIds.size}/${test.taskIds.size}，已产生 ${outputLines} 行输出…` });
-  }, 5000);
+  test.selectedAgents = test.agents.filter((agent) => test.selected.has(agent.id));
+  test.pendingAgents = [...test.selectedAgents];
+  test.taskIds = new Set();
+  test.results = [];
+  test.errors = [];
+  test.currentAgent = null;
+  test.currentTaskId = null;
+  test.startedAt = Date.now();
+  test.stopRequested = false;
+  test.state = 'running';
+  await safeCall('answerCallbackQuery', { callback_query_id: test.queryId, text: `已加入 ${test.selectedAgents.length} 个 Agent，将依次测速` });
+  await renderProgress(test, true);
+  const timer = setInterval(() => renderProgress(test), 2000);
   timer.unref?.();
   test.timer = timer;
+  await startNextAgent(test);
 }
 
 async function completeTelegramTask(task, view) {
-  const test = [...activeTests.values()].find((item) => item.taskIds?.has(task.id));
+  const test = [...activeTests.values()].find((item) => item.currentTaskId === task.id);
   if (!test) return;
-  test.completedTaskIds.add(task.id);
+  const itemElapsed = elapsedMs(view.createdAt, view.finishedAt);
+  test.results.push({ agent: test.currentAgent, status: view.status, elapsed: itemElapsed });
   await safeCall('sendMessage', { chat_id: test.chatId, text: resultText(view), parse_mode: 'HTML' });
-  await sendChart(test.chatId, view.metrics);
-  if (test.completedTaskIds.size === test.taskIds.size) {
-    clearInterval(test.timer);
-    activeTests.delete(test.id);
-    await safeCall('editMessageText', { chat_id: test.chatId, message_id: test.messageId, text: `全部测试已结束：${test.completedTaskIds.size}/${test.taskIds.size}` });
-  }
+  await sendChart(test.chatId, view, test.startedAt);
+  test.currentTaskId = null;
+  test.currentAgent = null;
+  if (test.stopRequested) return finalizeBatch(test);
+  await startNextAgent(test);
 }
 
 async function callbackQuery(query) {
@@ -247,6 +368,10 @@ async function callbackQuery(query) {
   }
   test.queryId = query.id;
   const action = data[2];
+  if (test.state === 'running' && !['refresh', 'stop'].includes(action)) {
+    await safeCall('answerCallbackQuery', { callback_query_id: query.id, text: '测速正在进行中', show_alert: true });
+    return;
+  }
   if (action === 'toggle') {
     const agentId = data[3];
     if (test.selected.has(agentId)) test.selected.delete(agentId); else test.selected.add(agentId);
@@ -258,6 +383,28 @@ async function callbackQuery(query) {
     await safeCall('editMessageReplyMarkup', { chat_id: test.chatId, message_id: test.messageId, reply_markup: selectionKeyboard(test) });
   } else if (action === 'done') {
     await finishTest(test);
+  } else if (action === 'refresh') {
+    await safeCall('answerCallbackQuery', { callback_query_id: query.id, text: '状态已刷新' });
+    await renderProgress(test, true);
+  } else if (action === 'stop') {
+    if (test.stopRequested) {
+      await safeCall('answerCallbackQuery', { callback_query_id: query.id, text: '正在中止测试' });
+      return;
+    }
+    test.stopRequested = true;
+    test.pendingAgents = [];
+    await safeCall('answerCallbackQuery', { callback_query_id: query.id, text: '正在中止当前测试' });
+    if (test.currentTaskId) {
+      try { api.cancelTest(test.user, test.currentTaskId); }
+      catch (error) {
+        test.errors.push({ agent: test.currentAgent, error: `中止失败：${error.message}` });
+        test.currentTaskId = null;
+        test.currentAgent = null;
+        await finalizeBatch(test);
+      }
+    } else {
+      await finalizeBatch(test);
+    }
   } else if (action === 'cancel') {
     activeTests.delete(test.id);
     await safeCall('answerCallbackQuery', { callback_query_id: query.id, text: '已取消' });
@@ -358,4 +505,4 @@ export async function startTelegramBot() {
   }
 }
 
-export const telegramTest = { activeTests, callbackQuery, chartSvg, selectionKeyboard };
+export const telegramTest = { activeTests, callbackQuery, chartSvg, completeTelegramTask, finishTest, progressKeyboard, selectionKeyboard };

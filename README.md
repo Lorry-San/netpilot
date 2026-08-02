@@ -168,9 +168,9 @@ Each user binds one Telegram account from **Account Settings**:
 2. Send `/bind <code>` to the Bot within 10 minutes.
 3. Use `/agents` or `/iperf <ip> <port> [threads] [duration]` in a private chat or an allowed group.
 
-`/iperf` defaults to one stream and 10 seconds. The Bot presents the online Agents available to the bound NetPilot user as an authenticated, paginated multi-select keyboard. Callback buttons are tied to the requesting Telegram ID and the binding is checked again on every click. Each selected Agent gets its own normal NetPilot test, so Web Agent permissions and busy/offline checks still apply.
+`/iperf` defaults to one stream and 10 seconds. The Bot presents the online Agents available to the bound NetPilot user as an authenticated, paginated multi-select keyboard. Callback buttons are tied to the requesting Telegram ID and the binding is checked again on every click. Selected Agents run strictly one at a time because a standard iperf3 server accepts only one client; the next Agent is dispatched only after the current task completes. Web Agent permissions and busy/offline checks still apply.
 
-The final response includes a summary, Telegram's expandable raw-output block and a PNG speed/time chart with axes and units. Long raw output is tail-truncated to stay within Telegram message limits.
+The running message shows the current Agent, per-test progress, output-line count and elapsed batch time, with authenticated refresh and stop controls. The final response includes per-test and overall elapsed time, Telegram's expandable raw-output block and a PNG chart uploaded as a document. Charts include labelled X/Y axes, units, markers and the measured value at every point. Long raw output is tail-truncated to stay within Telegram message limits.
 
 Sending a command from a group registers that group in **User Management → Telegram Groups**. Administrators can select several groups in one continuous list and set them to:
 

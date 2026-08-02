@@ -57,6 +57,8 @@ test('static assets and installer script are served', async (t) => {
   assert.match(indexHtml, /id="setting-script-base"/);
   assert.match(indexHtml, /id="setting-github-accel-enabled"/);
   assert.match(indexHtml, /id="current-version"/);
+  assert.match(indexHtml, /id="update-agent-panel"/);
+  assert.match(indexHtml, /id="agent-update-command"/);
 
   for (const asset of ['/app.js', '/styles.css']) {
     const response = await fetch(base + asset);
@@ -72,6 +74,18 @@ test('static assets and installer script are served', async (t) => {
   assert.match(script, /systemctl/);
   assert.match(script, /openrc-run/);
   assert.match(script, /NETPILOT_GITHUB_ACCEL/);
+
+  const updater = await fetch(`${base}/update-agent.sh`);
+  assert.equal(updater.status, 200);
+  const updateScript = await updater.text();
+  assert.match(updateScript, /SHA256SUMS/);
+  assert.match(updateScript, /x86_64\|amd64/);
+  assert.match(updateScript, /aarch64\|arm64/);
+  assert.match(updateScript, /ROLLBACK="native"/);
+  assert.match(updateScript, /ROLLBACK="docker"/);
+  assert.match(updateScript, /systemctl/);
+  assert.match(updateScript, /rc-service/);
+  assert.match(updateScript, /docker pull/);
 
   const missing = await fetch(`${base}/../src/server.js`);
   assert.notEqual(missing.status, 200);

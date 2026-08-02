@@ -228,6 +228,12 @@ function showInstall(install) {
   $('#install-panel').scrollIntoView({ behavior: 'smooth', block: 'start' });
 }
 
+function showAgentUpdate(update) {
+  $('#agent-update-command').value = update.command;
+  $('#update-agent-panel').hidden = false;
+  $('#update-agent-panel').scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
 function renderAgents() {
   const tbody = $('#agents-body');
   clear(tbody);
@@ -243,6 +249,12 @@ function renderAgents() {
     actions.className = 'row-actions';
     if (state.user.role === 'admin') {
       const connected = agent.status === 'online' || agent.status === 'busy';
+      actions.appendChild(button(agent.status === 'busy' ? '测试中不可更新' : '更新命令', 'secondary', async () => {
+        try {
+          const result = await api(`/api/admin/agents/${encodeURIComponent(agent.id)}/update-command`, { method: 'POST', body: '{}' });
+          showAgentUpdate(result.update);
+        } catch (error) { toast(error.message); }
+      }, agent.status === 'busy'));
       actions.appendChild(button(connected ? '在线不可安装' : '安装命令', 'secondary', async () => {
         try {
           const result = await api(`/api/admin/agents/${encodeURIComponent(agent.id)}/install`, { method: 'POST', body: '{}' });
@@ -499,17 +511,19 @@ $('#refresh-tests').addEventListener('click', () => loadTests().catch((error) =>
 $('#add-agent').addEventListener('click', () => $('#agent-dialog').showModal());
 $('#agent-form').addEventListener('submit', async (event) => {
   event.preventDefault();
+  const form = event.currentTarget;
   if (event.submitter?.value === 'cancel') { $('#agent-dialog').close(); return; }
-  if (!event.currentTarget.reportValidity()) return;
+  if (!form.reportValidity()) return;
   try {
     const result = await api('/api/admin/agents', { method: 'POST', body: JSON.stringify({ name: $('#agent-name').value }) });
     $('#agent-dialog').close();
-    event.currentTarget.reset();
+    form.reset();
     showInstall(result.install);
     await loadAgents();
   } catch (error) { toast(error.message); }
 });
 $('#close-install').addEventListener('click', () => { $('#install-panel').hidden = true; });
+$('#close-agent-update').addEventListener('click', () => { $('#update-agent-panel').hidden = true; });
 $$('.copy-command').forEach((node) => node.addEventListener('click', async () => {
   try { await navigator.clipboard.writeText($(`#${node.dataset.target}`).value); toast('命令已复制'); }
   catch { toast('复制失败，请手动选择命令'); }
@@ -519,13 +533,14 @@ $('#add-user').addEventListener('click', () => $('#user-dialog').showModal());
 $('#new-role').addEventListener('change', () => { $('#new-agent-access-row').hidden = $('#new-role').value === 'admin'; });
 $('#user-form').addEventListener('submit', async (event) => {
   event.preventDefault();
+  const form = event.currentTarget;
   if (event.submitter?.value === 'cancel') { $('#user-dialog').close(); return; }
-  if (!event.currentTarget.reportValidity()) return;
+  if (!form.reportValidity()) return;
   const agentIds = [...$('#new-agent-ids').selectedOptions].map((option) => option.value);
   try {
     await api('/api/users', { method: 'POST', body: JSON.stringify({ username: $('#new-username').value, displayName: $('#new-display-name').value, password: $('#new-password').value, role: $('#new-role').value, agentIds }) });
     $('#user-dialog').close();
-    event.currentTarget.reset();
+    form.reset();
     $('#new-agent-access-row').hidden = false;
     await loadUsers();
   } catch (error) { toast(error.message); }

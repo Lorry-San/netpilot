@@ -118,11 +118,24 @@ test('security invariants, roles and Agent installation lock', async (t) => {
   assert.match(createdAgent.body.install.docker, /wss:\/\/agents\.example\.com:8443\/ws\/agent/);
   assert.match(createdAgent.body.install.docker, /CI Agent'"'"'s node/);
   assert.match(createdAgent.body.install.script, /^curl -fsSL 'https:\/\/downloads\.example\.com\/install-agent\.sh'/);
+  assert.match(createdAgent.body.install.script, /NETPILOT_REPO='Lorry-San\/netpilot'/);
   assert.match(createdAgent.body.install.script, /NETPILOT_GITHUB_ACCEL='https:\/\/ghproxy\.example\.com\/'/);
   const agentID = createdAgent.body.agent.id;
   const storedAgent = database.prepare('SELECT * FROM agents WHERE id = ?').get(agentID);
   assert.equal(storedAgent.token_hash.length, 64);
   assert.ok(!storedAgent.token_hash.includes(createdAgent.body.install.token));
+
+  const updateCommand = await request(base, `/api/admin/agents/${agentID}/update-command`, { method: 'POST', body: '{}' }, session);
+  assert.equal(updateCommand.response.status, 200);
+  assert.match(updateCommand.body.update.command, /^\(tmp="\$\(mktemp\)"/);
+  assert.match(updateCommand.body.update.command, /https:\/\/downloads\.example\.com\/update-agent\.sh/);
+  assert.match(updateCommand.body.update.command, /NETPILOT_REPO='Lorry-San\/netpilot'/);
+  assert.match(updateCommand.body.update.command, /NETPILOT_GITHUB_ACCEL='https:\/\/ghproxy\.example\.com\/'/);
+  assert.doesNotMatch(updateCommand.body.update.command, new RegExp(createdAgent.body.install.token));
+  database.prepare("UPDATE agents SET status = 'busy' WHERE id = ?").run(agentID);
+  const busyUpdate = await request(base, `/api/admin/agents/${agentID}/update-command`, { method: 'POST', body: '{}' }, session);
+  assert.equal(busyUpdate.response.status, 409);
+  database.prepare("UPDATE agents SET status = 'offline' WHERE id = ?").run(agentID);
 
   const rotated = await request(base, `/api/admin/agents/${agentID}/install`, { method: 'POST', body: '{}' }, session);
   assert.equal(rotated.response.status, 200);
@@ -147,6 +160,8 @@ test('security invariants, roles and Agent installation lock', async (t) => {
   assert.deepEqual(assignedAgents.body.agents.map((agent) => agent.id), [agentID]);
   const forbiddenSettings = await request(base, '/api/settings', {}, userSession);
   assert.equal(forbiddenSettings.response.status, 403);
+  const forbiddenUpdate = await request(base, `/api/admin/agents/${agentID}/update-command`, { method: 'POST', body: '{}' }, userSession);
+  assert.equal(forbiddenUpdate.response.status, 403);
 
   const secondAdmin = await request(base, '/api/users', { method: 'POST', body: JSON.stringify({ username: 'backup-admin', displayName: 'Backup Admin', password: 'Backup-Admin-Password-2026', role: 'admin' }) }, session);
   assert.equal(secondAdmin.response.status, 201);
@@ -157,7 +172,7 @@ test('security invariants, roles and Agent installation lock', async (t) => {
 
   const version = await request(base, '/api/system/version', {}, session);
   assert.equal(version.response.status, 200);
-  assert.equal(version.body.current, '0.1.2');
+  assert.equal(version.body.current, '0.1.3');
   assert.ok(Object.hasOwn(version.body, 'updateAvailable'));
 
   socket.close();

@@ -63,6 +63,7 @@
       <section id="view-agents" class="page" hidden>
         <section class="panel"><div class="panel-heading"><h2>Agent 节点</h2><button id="add-agent" class="primary" data-admin-only type="button">添加 Agent</button></div><div class="table-wrap"><table><thead><tr><th>名称</th><th>状态</th><th>平台</th><th>公网 IP / 归属地</th><th>资源</th><th>操作</th></tr></thead><tbody id="agents-body"></tbody></table></div></section>
         <section id="install-panel" class="panel" hidden><div class="panel-heading"><h2>安装 Agent</h2><button id="close-install" class="secondary" type="button">关闭</button></div><div class="install-content"><p>Token 仅在本次生成后展示。Agent 在线时不能重新生成安装命令。</p><label>Docker（Alpine x86-64）<textarea id="install-docker" rows="5" readonly></textarea></label><button class="secondary copy-command" data-target="install-docker">复制 Docker 命令</button><label>一键安装脚本（自动识别 x86-64 / arm64）<textarea id="install-script" rows="4" readonly></textarea></label><button class="secondary copy-command" data-target="install-script">复制脚本命令</button></div></section>
+        <section id="update-agent-panel" class="panel" hidden><div class="panel-heading"><h2>更新 Agent</h2><button id="close-agent-update" class="secondary" type="button">关闭</button></div><div class="install-content"><p>在 Agent 所在主机以 root 身份执行。脚本自动识别原生服务或标准 Docker 容器，保留 Token 与连接配置，校验下载并在失败时回滚。</p><label>Agent 原地更新命令<textarea id="agent-update-command" rows="3" readonly></textarea></label><button class="secondary copy-command" data-target="agent-update-command">复制更新命令</button></div></section>
       </section>
 
       <section id="view-users" class="page" hidden data-admin-only>
@@ -79,9 +80,9 @@
                 <input id="setting-agent-ws" type="url" placeholder="wss://iperf.example.com">
                 <small>Agent 长连接使用的地址；支持 <code>wss://</code>、<code>ws://</code> 和端口。</small>
               </label>
-              <label>安装脚本拉取地址
+              <label>Agent 脚本拉取地址
                 <input id="setting-script-base" type="url" placeholder="https://iperf.example.com">
-                <small>一键安装命令下载 <code>/install-agent.sh</code> 使用的地址。</small>
+                <small>安装与更新命令下载 <code>/install-agent.sh</code>、<code>/update-agent.sh</code> 使用的地址。</small>
               </label>
               <label class="switch-row"><span>使用 GitHub 加速</span><input id="setting-github-accel-enabled" type="checkbox"></label>
               <label>GitHub 加速地址

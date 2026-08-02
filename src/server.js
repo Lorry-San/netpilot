@@ -198,6 +198,7 @@ function installCommands(agent, token, baseUrl = publicBaseUrl) {
   const script = `${scriptBase}/install-agent.sh`;
   const accel = settings.github_accel_enabled === '1' ? String(settings.github_accel_domain || '').trim() : '';
   const environment = [
+    `NETPILOT_REPO=${shellQuote(githubRepo)}`,
     accel ? `NETPILOT_GITHUB_ACCEL=${shellQuote(accel.endsWith('/') ? accel : `${accel}/`)}` : '',
     `NETPILOT_SERVER=${shellQuote(wsUrl)}`,
     `NETPILOT_TOKEN=${shellQuote(token)}`,
@@ -210,6 +211,18 @@ function installCommands(agent, token, baseUrl = publicBaseUrl) {
     script: `curl -fsSL ${shellQuote(script)} | env ${environment} sh`,
     binary: `${environment} ./netpilot-agent`
   };
+}
+
+function agentUpdateCommand(baseUrl = publicBaseUrl) {
+  const settings = getSettings();
+  const scriptBase = settings.script_base || baseUrl;
+  const script = `${scriptBase}/update-agent.sh`;
+  const accel = settings.github_accel_enabled === '1' ? String(settings.github_accel_domain || '').trim() : '';
+  const environment = [
+    `NETPILOT_REPO=${shellQuote(githubRepo)}`,
+    accel ? `NETPILOT_GITHUB_ACCEL=${shellQuote(accel.endsWith('/') ? accel : `${accel}/`)}` : ''
+  ].filter(Boolean).join(' ');
+  return `(tmp="$(mktemp)" && trap 'rm -f "$tmp"' EXIT HUP INT TERM && curl -fsSL ${shellQuote(script)} -o "$tmp" && env ${environment} sh "$tmp")`;
 }
 
 function createAgent(name, baseUrl) {
@@ -519,6 +532,16 @@ async function handleApi(req, res, pathname) {
     audit(user.id, 'agent.token.rotate', agent.id);
     return json(res, 200, { agent: agentView(get('SELECT * FROM agents WHERE id = ?', agent.id)), install });
   }
+  const updateMatch = pathname.match(/^\/api\/admin\/agents\/([^/]+)\/update-command$/);
+  if (req.method === 'POST' && updateMatch) {
+    requireAdmin(user);
+    const agent = get('SELECT * FROM agents WHERE id = ?', updateMatch[1]);
+    if (!agent) return json(res, 404, { error: 'Agent 不存在' });
+    if (agent.status === 'busy') return json(res, 409, { error: 'Agent 正在执行测试，请等待任务结束后再更新' });
+    const command = agentUpdateCommand(requestBaseUrl(req));
+    audit(user.id, 'agent.update.command', agent.id);
+    return json(res, 200, { agent: agentView(agent), update: { command } });
+  }
   if (req.method === 'DELETE' && pathname.startsWith('/api/admin/agents/')) {
     requireAdmin(user);
     const agentId = pathname.split('/').pop();
@@ -539,7 +562,7 @@ const server = createServer(async (req, res) => {
     const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
     if (req.method === 'OPTIONS') return json(res, 204, {});
     if (url.pathname.startsWith('/api/')) return await handleApi(req, res, url.pathname);
-    if (url.pathname === '/install-agent.sh') return serveStatic(req, res, '/install-agent.sh');
+    if (url.pathname === '/install-agent.sh' || url.pathname === '/update-agent.sh') return serveStatic(req, res, url.pathname);
     if (serveStatic(req, res, url.pathname)) return;
     return text(res, 404, 'Not found');
   } catch (error) {

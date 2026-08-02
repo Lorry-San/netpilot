@@ -50,6 +50,8 @@ test('static assets and installer script are served', async (t) => {
   assert.equal(index.headers.get('cache-control'), 'no-cache');
   const indexHtml = await index.text();
   assert.match(indexHtml, /password/i);
+  assert.doesNotMatch(indexHtml, /id="login-username"[^>]*value=/);
+  assert.equal((indexHtml.match(/formnovalidate/g) || []).length, 4);
 
   for (const asset of ['/app.js', '/styles.css']) {
     const response = await fetch(base + asset);

@@ -55,6 +55,10 @@ test('static assets and installer script are served', async (t) => {
   assert.match(indexHtml, /id="account-button"/);
   assert.match(indexHtml, /id="account-menu"/);
   assert.match(indexHtml, /id="profile-dialog"/);
+  assert.match(indexHtml, /data-view="telegram"/);
+  assert.match(indexHtml, /id="view-telegram"/);
+  assert.match(indexHtml, /id="telegram-page-identity"/);
+  assert.match(indexHtml, /id="telegram-generate-code"/);
   assert.match(indexHtml, /id="user-edit-dialog"/);
   assert.doesNotMatch(indexHtml, /id="profile-uid"[^>]*input/);
   assert.match(indexHtml, /class="readonly-field"><span>UID<\/span><strong id="profile-uid"/);
@@ -68,7 +72,7 @@ test('static assets and installer script are served', async (t) => {
   assert.match(indexHtml, /id="setting-github-accel-enabled"/);
   assert.match(indexHtml, /id="setting-telegram-token"/);
   assert.match(indexHtml, /id="setting-telegram-status"/);
-  assert.match(indexHtml, /\/app\.js\?v=0\.1\.12/);
+  assert.match(indexHtml, /\/app\.js\?v=0\.1\.14/);
   assert.match(indexHtml, /id="generate-telegram-code"/);
   assert.match(indexHtml, /id="telegram-group-choices"/);
   assert.match(indexHtml, /id="telegram-groups-all-members"/);
@@ -96,7 +100,7 @@ test('static assets and installer script are served', async (t) => {
   assert.match(appScript, /\/update`/);
   assert.match(appScript, /selectedAgentIds/);
   assert.match(appScript, /\/api\/telegram\/bind-code/);
-  assert.match(appScript, /\/api\/admin\/telegram\/groups/);
+  assert.match(appScript, /\/api\/telegram\/groups/);
 
   const installer = await fetch(`${base}/install-agent.sh`);
   assert.equal(installer.status, 200);

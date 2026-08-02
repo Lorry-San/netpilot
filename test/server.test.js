@@ -265,6 +265,15 @@ test('security invariants, roles and Agent installation lock', async (t) => {
   assert.equal(database.prepare('SELECT user_id FROM telegram_bind_codes WHERE code = ?').get(bindCode.body.code).user_id, newUser.body.user.id);
   const groupTime = new Date().toISOString();
   database.prepare("INSERT INTO telegram_groups (chat_id, title, owner_user_id, mode, created_at, updated_at) VALUES (-100123, 'CI Group', ?, 'members_only', ?, ?)").run(newUser.body.user.id, groupTime, groupTime);
+  const userTelegram = await request(base, '/api/telegram', {}, userSession);
+  assert.equal(userTelegram.response.status, 200);
+  assert.equal(userTelegram.body.bot.enabled, false);
+  assert.equal(userTelegram.body.canSetPublic, false);
+  assert.deepEqual(userTelegram.body.groups.map((group) => group.chatId), [-100123]);
+  const forbiddenPublicMode = await request(base, '/api/telegram/groups/mode', { method: 'POST', body: JSON.stringify({ chatIds: ['-100123'], mode: 'all_members' }) }, userSession);
+  assert.equal(forbiddenPublicMode.response.status, 403);
+  const userPrivateMode = await request(base, '/api/telegram/groups/mode', { method: 'POST', body: JSON.stringify({ chatIds: ['-100123'], mode: 'members_only' }) }, userSession);
+  assert.equal(userPrivateMode.response.status, 200);
   const forbiddenGroups = await request(base, '/api/admin/telegram/groups', {}, userSession);
   assert.equal(forbiddenGroups.response.status, 403);
   const groups = await request(base, '/api/admin/telegram/groups', {}, session);
@@ -310,7 +319,7 @@ test('security invariants, roles and Agent installation lock', async (t) => {
 
   const version = await request(base, '/api/system/version', {}, session);
   assert.equal(version.response.status, 200);
-  assert.equal(version.body.current, '0.1.13');
+  assert.equal(version.body.current, '0.1.14');
   assert.ok(Object.hasOwn(version.body, 'updateAvailable'));
 
   socket.close();

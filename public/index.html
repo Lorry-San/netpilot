@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>NetPilot</title>
-  <link rel="stylesheet" href="/styles.css?v=0.1.12">
+  <link rel="stylesheet" href="/styles.css?v=0.1.14">
 </head>
 <body>
   <main id="login-view" class="login-shell">
@@ -24,6 +24,7 @@
       <nav>
         <button data-view="tests" class="active">测试台</button>
         <button data-view="agents">Agent</button>
+        <button data-view="telegram">Telegram</button>
         <button data-view="users" data-admin-only>用户管理</button>
         <button data-view="settings" data-system-admin-only>系统设置</button>
       </nav>
@@ -83,10 +84,32 @@
         <section id="update-agent-panel" class="panel" hidden><div class="panel-heading"><h2>手动更新 Agent</h2><button id="close-agent-update" class="secondary" type="button">关闭</button></div><div class="install-content"><p>在 Agent 所在主机以 root 身份执行。脚本自动识别原生服务或标准 Docker 容器，保留 Token 与连接配置，校验下载并在失败时回滚。</p><label>Agent 手动更新命令<textarea id="agent-update-command" rows="3" readonly></textarea></label><button class="secondary copy-command" data-target="agent-update-command">复制手动更新命令</button></div></section>
       </section>
 
-      <section id="view-users" class="page" hidden data-admin-only>
-        <section class="panel"><div class="panel-heading"><h2>用户与角色</h2><button id="add-user" class="primary" type="button">新增用户</button></div><div class="table-wrap"><table><thead><tr><th>UID</th><th>用户</th><th>角色</th><th>Agent 权限</th><th>状态</th><th>操作</th></tr></thead><tbody id="users-body"></tbody></table></div></section>
+      <section id="view-telegram" class="page" hidden>
+        <div class="telegram-page-layout">
+          <section class="panel telegram-account-panel">
+            <div class="panel-heading"><h2>Telegram 绑定</h2><span id="telegram-page-status" class="status">读取中</span></div>
+            <div class="telegram-account-content">
+              <div class="readonly-field"><span>Bot</span><strong><a id="telegram-bot-link" target="_blank" rel="noreferrer">未启用</a></strong></div>
+              <div class="readonly-field"><span>当前账户</span><strong id="telegram-page-identity">未绑定</strong></div>
+              <div id="telegram-page-bind-code-row" class="bind-code-row" hidden><code id="telegram-page-bind-code">------</code><span>10 分钟内私信 Bot：<code>/bind 验证码</code></span></div>
+              <div class="telegram-binding-actions">
+                <button id="telegram-generate-code" class="primary" type="button">生成绑定码</button>
+                <button id="telegram-unbind" class="secondary" type="button" hidden>解除绑定</button>
+              </div>
+            </div>
+          </section>
+          <section class="panel telegram-command-panel">
+            <div class="panel-heading"><h2>Bot 命令</h2><span class="status">自动注册</span></div>
+            <div class="telegram-command-list">
+              <div><code>/help</code><span>查看命令帮助</span></div>
+              <div><code>/status</code><span>查看授权、会话模式和 Agent 状态</span></div>
+              <div><code>/agents</code><span>查看当前账户可用的在线 Agent</span></div>
+              <div><code>/iperf IP 端口 [线程] [时长]</code><span>发起串行测速任务</span></div>
+            </div>
+          </section>
+        </div>
         <section class="panel telegram-groups-panel">
-          <div class="panel-heading"><h2>Telegram 群组</h2><button id="refresh-telegram-groups" class="secondary" type="button">刷新</button></div>
+          <div class="panel-heading"><div><h2>Telegram 群组</h2><p id="telegram-group-limit" class="help"></p></div><button id="refresh-telegram-groups" class="secondary" type="button">刷新</button></div>
           <div class="telegram-group-controls">
             <div class="picker-toolbar">
               <button class="secondary telegram-group-action" data-action="all" type="button">全选</button>
@@ -95,12 +118,16 @@
             </div>
             <div id="telegram-group-choices" class="telegram-group-choice-box" role="group" aria-label="Telegram 群组"></div>
             <div class="telegram-group-batch-actions">
-              <button id="telegram-groups-owner-only" class="secondary" type="button">设为仅群主可用</button>
-              <button id="telegram-groups-all-members" class="secondary" type="button">设为全员可用</button>
+              <button id="telegram-groups-owner-only" class="secondary" type="button">设为私有模式</button>
+              <button id="telegram-groups-all-members" class="secondary" data-admin-only type="button">设为公共模式</button>
               <button id="telegram-groups-remove" class="secondary danger-button" type="button">移除群组</button>
             </div>
           </div>
         </section>
+      </section>
+
+      <section id="view-users" class="page" hidden data-admin-only>
+        <section class="panel"><div class="panel-heading"><h2>用户与角色</h2><button id="add-user" class="primary" type="button">新增用户</button></div><div class="table-wrap"><table><thead><tr><th>UID</th><th>用户</th><th>角色</th><th>Agent 权限</th><th>状态</th><th>操作</th></tr></thead><tbody id="users-body"></tbody></table></div></section>
       </section>
 
       <section id="view-settings" class="page" hidden data-system-admin-only>
@@ -220,6 +247,6 @@
   </dialog>
 
   <div id="toast" role="status" aria-live="polite"></div>
-  <script type="module" src="/app.js?v=0.1.12"></script>
+  <script type="module" src="/app.js?v=0.1.14"></script>
 </body>
 </html>

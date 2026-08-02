@@ -678,6 +678,52 @@ async function handleApi(req, res, pathname) {
       checkedAt: latestReleaseCache.checkedAt ? new Date(latestReleaseCache.checkedAt).toISOString() : null
     });
   }
+  if (req.method === 'GET' && pathname === '/api/telegram') {
+    const settings = getSettings();
+    const binding = get('SELECT telegram_id AS telegramId, telegram_username AS telegramUsername, bound_at AS boundAt FROM telegram_users WHERE user_id = ?', user.id);
+    const groups = user.role === 'admin'
+      ? all(`SELECT g.chat_id AS chatId, g.title, g.owner_user_id AS ownerUserId, g.mode, g.updated_at AS updatedAt, u.display_name AS ownerName
+             FROM telegram_groups g LEFT JOIN users u ON u.id = g.owner_user_id ORDER BY g.updated_at DESC`)
+      : all(`SELECT g.chat_id AS chatId, g.title, g.owner_user_id AS ownerUserId, g.mode, g.updated_at AS updatedAt, u.display_name AS ownerName
+             FROM telegram_groups g LEFT JOIN users u ON u.id = g.owner_user_id WHERE g.owner_user_id = ? ORDER BY g.updated_at DESC`, user.id);
+    return json(res, 200, {
+      bot: { enabled: Boolean(settings.telegram_bot_token), username: settings.telegram_bot_username || '' },
+      binding: binding ? { telegramId: String(binding.telegramId), username: binding.telegramUsername, boundAt: binding.boundAt } : null,
+      groups,
+      canSetPublic: user.role === 'admin'
+    });
+  }
+  if (req.method === 'POST' && pathname === '/api/telegram/groups/mode') {
+    const body = await bodyJson(req);
+    const mode = body.mode === 'all_members' ? 'all_members' : body.mode === 'members_only' ? 'members_only' : null;
+    const chatIds = Array.isArray(body.chatIds) ? [...new Set(body.chatIds.map((value) => String(value)))] : [];
+    if (!mode || !chatIds.length) return json(res, 400, { error: !mode ? '群组模式无效' : '请选择至少一个群组' });
+    if (mode === 'all_members' && user.role !== 'admin') return json(res, 403, { error: '只有管理员可以启用公共模式' });
+    const placeholders = chatIds.map(() => '?').join(',');
+    const owned = user.role === 'admin'
+      ? all(`SELECT chat_id FROM telegram_groups WHERE chat_id IN (${placeholders})`, ...chatIds)
+      : all(`SELECT chat_id FROM telegram_groups WHERE owner_user_id = ? AND chat_id IN (${placeholders})`, user.id, ...chatIds);
+    if (owned.length !== chatIds.length) return json(res, 403, { error: '只能管理自己登记的群组' });
+    const timestamp = now();
+    let updated = 0;
+    for (const chatId of chatIds) updated += Number(run('UPDATE telegram_groups SET mode = ?, updated_at = ? WHERE chat_id = ?', mode, timestamp, chatId).changes);
+    audit(user.id, 'telegram.groups.mode', 'telegram_groups', { chatIds, mode, updated });
+    return json(res, 200, { ok: true, updated });
+  }
+  if (req.method === 'DELETE' && pathname === '/api/telegram/groups') {
+    const body = await bodyJson(req);
+    const chatIds = Array.isArray(body.chatIds) ? [...new Set(body.chatIds.map((value) => String(value)))] : [];
+    if (!chatIds.length) return json(res, 400, { error: '请选择至少一个群组' });
+    const placeholders = chatIds.map(() => '?').join(',');
+    const owned = user.role === 'admin'
+      ? all(`SELECT chat_id FROM telegram_groups WHERE chat_id IN (${placeholders})`, ...chatIds)
+      : all(`SELECT chat_id FROM telegram_groups WHERE owner_user_id = ? AND chat_id IN (${placeholders})`, user.id, ...chatIds);
+    if (owned.length !== chatIds.length) return json(res, 403, { error: '只能管理自己登记的群组' });
+    let removed = 0;
+    for (const chatId of chatIds) removed += Number(run('DELETE FROM telegram_groups WHERE chat_id = ?', chatId).changes);
+    audit(user.id, 'telegram.groups.remove', 'telegram_groups', { chatIds, removed });
+    return json(res, 200, { ok: true, removed });
+  }
   if (pathname === '/api/settings') {
     if (user.id !== 1) return json(res, 403, { error: '只有系统管理员（uid=1）可以访问系统设置' });
     if (req.method === 'GET') {

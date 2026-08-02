@@ -147,7 +147,16 @@ dialog form { display: grid; gap: 14px; padding: 16px; }
 .agent-choice:hover { border-color: var(--accent); }
 .agent-choice input { width: auto; min-height: 0; accent-color: var(--accent); }
 .empty-choice { margin: 0; color: var(--muted); }
-.telegram-groups-panel { margin-top: 18px; }
+.telegram-page-layout { display: grid; grid-template-columns: minmax(0, 1fr) minmax(300px, .9fr); gap: 18px; align-items: start; }
+.telegram-account-content, .telegram-command-list { display: grid; gap: 14px; padding: 16px; }
+.telegram-command-list { gap: 0; padding-top: 8px; padding-bottom: 8px; }
+.telegram-command-list > div { display: grid; grid-template-columns: minmax(180px, .8fr) 1fr; gap: 16px; align-items: center; min-height: 42px; border-bottom: 1px solid var(--border); }
+.telegram-command-list > div:last-child { border-bottom: 0; }
+.telegram-command-list span { color: var(--muted); font-size: .9rem; }
+.telegram-command-list code { color: var(--accent); }
+.telegram-groups-panel { margin-top: 0; }
+.telegram-groups-panel .panel-heading { align-items: flex-start; }
+.telegram-groups-panel .panel-heading h2 { margin-bottom: 3px; }
 .telegram-group-controls { display: grid; padding: 12px; }
 .telegram-group-controls .picker-toolbar { padding: 0 0 10px; }
 .telegram-group-choice-box { max-height: 260px; overflow: auto; border: 1px solid var(--border); border-radius: 6px; background: var(--surface); }
@@ -172,19 +181,26 @@ dialog form { display: grid; gap: 14px; padding: 16px; }
   .sidebar nav button::first-letter { font-size: 1rem; }
   .test-grid { grid-template-columns: 1fr; }
   .settings-layout { grid-template-columns: 1fr; }
+  .telegram-page-layout { grid-template-columns: 1fr; }
   .metrics { grid-template-columns: repeat(2, 1fr); }
   .metrics > div:first-child { grid-column: 1 / -1; }
   table { min-width: 680px; }
 }
 @media (max-width: 560px) {
   .app-shell { display: block; }
-  .sidebar { position: static; width: 100%; height: auto; flex-direction: row; align-items: center; padding: 10px 12px; }
-  .sidebar .brand strong { display: inline; font-size: 1rem; }
-  .sidebar nav { margin-left: auto; display: flex; }
-  .sidebar nav button { width: auto; min-width: 42px; padding: 0 8px; font-size: .8rem; }
+  .sidebar { position: static; width: 100%; height: auto; flex-direction: row; align-items: center; gap: 6px; padding: 10px 12px; }
+  .sidebar .brand strong { display: none; }
+  .sidebar nav { min-width: 0; flex: 1; margin-left: 0; display: flex; justify-content: space-between; gap: 2px; }
+  .sidebar nav button { width: auto; min-width: 0; padding: 0 4px; font-size: .72rem; }
   .sidebar nav button::first-letter { font-size: inherit; }
+  .account-shell { width: 42px; flex: 0 0 42px; margin-top: 0; padding-top: 0; border-top: 0; }
+  .account { min-height: 38px; padding: 0; display: grid; place-items: center; font-size: 0; }
+  .account::before { content: "账户"; font-size: .72rem; }
+  .account-menu { position: fixed; left: auto; right: 10px; top: 56px; bottom: auto; width: 210px; }
   .topbar { height: 56px; padding: 0 14px; }
+  .topbar-actions #logout-button { display: none; }
   .page { padding: 14px; }
   .metrics { grid-template-columns: 1fr 1fr; }
   .split { grid-template-columns: minmax(0, 1fr) 82px; }
+  .telegram-command-list > div { grid-template-columns: 1fr; gap: 3px; padding: 8px 0; }
 }

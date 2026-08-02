@@ -162,22 +162,22 @@ The system administrator is always `uid=1`. API requests that attempt to delete,
 
 The `uid=1` system administrator can paste a BotFather token under **System Settings**. NetPilot validates it with `getMe` and shows the connected Bot username before starting Telegram Bot API long polling from the Node.js process, so no public webhook endpoint is required. Clearing the token stops the Bot.
 
-Each user binds one Telegram account from **Account Settings**:
+Each user binds one Telegram account from the dedicated **Telegram Bot** page:
 
 1. Select **Generate binding code** in the Web UI.
 2. Send `/bind <code>` to the Bot within 10 minutes.
-3. Use `/agents` or `/iperf <ip> <port> [threads] [duration]` in a private chat or an allowed group.
+3. Use `/help`, `/status`, `/agents` or `/iperf <ip> <port> [threads] [duration]` in a private chat or an allowed group.
 
-`/iperf` defaults to one stream and 10 seconds. The Bot presents the online Agents available to the bound NetPilot user as an authenticated, paginated multi-select keyboard. Callback buttons are tied to the requesting Telegram ID and the binding is checked again on every click. Selected Agents run strictly one at a time because a standard iperf3 server accepts only one client; the next Agent is dispatched only after the current task completes. Web Agent permissions and busy/offline checks still apply.
+The Bot registers its command menu automatically when it starts. Unbound users receive an unauthorized response in private chat, except that `/bind` remains available. `/iperf` defaults to one stream and 10 seconds. The Bot presents the online Agents available to the effective NetPilot user as an authenticated, paginated multi-select keyboard. Callback buttons are tied to the requesting Telegram ID and authorization is checked again on every click. Selected Agents run strictly one at a time because a standard iperf3 server accepts only one client; the next Agent is dispatched only after the current task completes. Web Agent permissions and busy/offline checks still apply.
 
 The running message shows the current Agent, per-test progress, output-line count and elapsed batch time, with authenticated refresh and stop controls. The final response includes per-test and overall elapsed time, Telegram's expandable raw-output block and a PNG chart uploaded as a document. Charts include labelled X/Y axes, units, markers and the measured value at every point. Long raw output is tail-truncated to stay within Telegram message limits.
 
-Sending a command from a group registers that group in **User Management → Telegram Groups**. Administrators can select several groups in one continuous list and set them to:
+Adding the Bot to a group registers that group on the **Telegram Bot** page when the adding Telegram account is already bound. Sending a command also registers it as a fallback. Administrators can select several groups in one continuous list and set them to:
 
-- **Owner only**: only the bound user who registered the group can use the Bot there.
-- **All members**: any NetPilot-bound Telegram user in that group can use the Bot with their own Agent permissions.
+- **Private**: only Telegram accounts bound to NetPilot can use the Bot, with their own Agent permissions.
+- **Public**: every group member can use the Bot. Unbound members use the Agent permissions of the account that registered the group.
 
-Administrators can register any number of groups. A regular user can register one group. Only NetPilot administrators can batch-change group modes or remove groups from the Web UI.
+Administrators can register any number of groups. A regular user can register one group and can keep it private or remove it. Only NetPilot administrators can enable public mode; all group changes are enforced again by the API.
 
 ## System settings and version detection
 

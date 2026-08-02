@@ -142,3 +142,88 @@ test('Telegram multi-Agent tests run serially and upload charts as documents', a
     globalThis.fetch = originalFetch;
   }
 });
+
+test('Telegram rejects unbound private messages and permits public-group members', async () => {
+  const originalApi = globalThis.netpilotServerApi;
+  const originalFetch = globalThis.fetch;
+  const requests = [];
+  let publicGroup = false;
+  globalThis.netpilotServerApi = {
+    db: {
+      get(sql) {
+        if (sql.includes('FROM telegram_users')) return null;
+        if (sql.startsWith('SELECT * FROM telegram_groups')) return publicGroup ? { chat_id: -1001, title: 'Public Group', owner_user_id: 1, mode: 'all_members' } : null;
+        if (sql.includes('FROM users WHERE id')) return { id: 1, username: 'admin', displayName: 'System Admin', role: 'admin', disabled: 0 };
+        if (sql.includes('COUNT(*)')) return { count: 1 };
+        return null;
+      },
+      all() { return [{ id: 'agent_one', name: 'Agent One', status: 'online' }]; },
+      run() {},
+      now() { return new Date().toISOString(); }
+    },
+    getSettings() { return { telegram_bot_token: '123456789:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA' }; }
+  };
+  globalThis.fetch = async (_url, options) => {
+    requests.push(JSON.parse(options.body));
+    return { ok: true, status: 200, async json() { return { ok: true, result: true }; } };
+  };
+
+  try {
+    const { telegramTest } = await import(`../src/telegram.js?authorization=${Date.now()}`);
+    await telegramTest.handleMessage({ from: { id: 99 }, chat: { id: 99, type: 'private' }, text: '/help' });
+    assert.match(requests.at(-1).text, /未授权/);
+
+    publicGroup = true;
+    await telegramTest.handleMessage({ from: { id: 99 }, chat: { id: -1001, type: 'group', title: 'Public Group' }, text: '/status' });
+    assert.match(requests.at(-1).text, /NetPilot Bot：在线/);
+    assert.match(requests.at(-1).text, /公共模式/);
+
+    const publicPicker = {
+      id: 'tg_public', telegramId: 99, publicChatId: -1001, chatId: -1001, messageId: 8,
+      user: { id: 1, role: 'admin' }, agents: [{ id: 'agent_one', name: 'Agent One', status: 'online' }],
+      selected: new Set(), page: 0
+    };
+    telegramTest.activeTests.set(publicPicker.id, publicPicker);
+    await telegramTest.callbackQuery({ id: 'query-public', from: { id: 99 }, data: 'tg:tg_public:toggle:agent_one:99' });
+    assert.deepEqual([...publicPicker.selected], ['agent_one']);
+  } finally {
+    globalThis.netpilotServerApi = originalApi;
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('Telegram registers its command menu when the Bot starts', async () => {
+  const originalApi = globalThis.netpilotServerApi;
+  const originalFetch = globalThis.fetch;
+  const originalDisable = process.env.NETPILOT_DISABLE_TELEGRAM;
+  const requests = [];
+  let settingsCalls = 0;
+  const botToken = '123456789:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA';
+  delete process.env.NETPILOT_DISABLE_TELEGRAM;
+  globalThis.netpilotServerApi = {
+    db: { get() {}, all() { return []; }, run() {}, now() { return new Date().toISOString(); } },
+    getSettings() {
+      settingsCalls += 1;
+      return settingsCalls <= 3 ? { telegram_bot_token: botToken } : {};
+    },
+    onTaskComplete() {}
+  };
+  globalThis.fetch = async (url, options) => {
+    requests.push({ url: String(url), body: JSON.parse(options.body) });
+    const result = String(url).endsWith('/getMe') ? { username: 'netpilot_test_bot' } : true;
+    return { ok: true, status: 200, async json() { return { ok: true, result }; } };
+  };
+
+  try {
+    const module = await import(`../src/telegram.js?commands=${Date.now()}`);
+    await module.startTelegramBot();
+    const registration = requests.find((request) => request.url.endsWith('/setMyCommands'));
+    assert.ok(registration);
+    assert.deepEqual(registration.body.commands.map((command) => command.command), ['help', 'status', 'bind', 'agents', 'iperf']);
+  } finally {
+    if (originalDisable === undefined) delete process.env.NETPILOT_DISABLE_TELEGRAM;
+    else process.env.NETPILOT_DISABLE_TELEGRAM = originalDisable;
+    globalThis.netpilotServerApi = originalApi;
+    globalThis.fetch = originalFetch;
+  }
+});

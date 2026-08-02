@@ -61,13 +61,14 @@ function groupFor(chatId) {
 }
 
 function ensureGroup(chat, user) {
-  if (!chat || chat.type === 'private' || !user) return null;
+  if (!chat || chat.type === 'private') return null;
   const existing = groupFor(chat.id);
   if (existing) {
     const title = chat.title || chat.username || String(chat.id);
     if (title !== existing.title) db.run('UPDATE telegram_groups SET title = ?, updated_at = ? WHERE chat_id = ?', title, db.now(), chat.id);
     return groupFor(chat.id);
   }
+  if (!user) return null;
   if (user.role !== 'admin' && db.get('SELECT COUNT(*) AS count FROM telegram_groups WHERE owner_user_id = ?', user.id).count >= 1) return null;
   const now = db.now();
   db.run(`INSERT OR IGNORE INTO telegram_groups (chat_id, title, owner_user_id, mode, created_at, updated_at)
@@ -79,10 +80,15 @@ function canUseChat(message, user) {
   const chat = message.chat;
   if (!chat || chat.type === 'private') return Boolean(user);
   const group = ensureGroup(chat, user);
-  if (!group || !user) return false;
-  if (group.mode === 'all_members' && user.role === 'admin') return true;
-  if (group.mode === 'all_members') return true;
-  return group.owner_user_id === user.id;
+  return Boolean(group && user);
+}
+
+function publicGroupUser(chat) {
+  if (!chat || chat.type === 'private') return null;
+  const group = groupFor(chat.id);
+  if (!group || group.mode !== 'all_members') return null;
+  return db.get(`SELECT id, username, display_name AS displayName, role, disabled
+                 FROM users WHERE id = ? AND disabled = 0`, group.owner_user_id);
 }
 
 function accessibleAgents(user) {
@@ -217,7 +223,20 @@ function resultText(view) {
 }
 
 async function sendHelp(chatId) {
-  await safeCall('sendMessage', { chat_id: chatId, text: '/bind <网页生成的6位验证码>\n/agents 查看可用 Agent\n/iperf <IP> <端口> [线程] [时长]\n在群组中首次使用会自动登记，管理员可在网页设置群组模式。', parse_mode: 'HTML' });
+  await safeCall('sendMessage', { chat_id: chatId, text: '/help 查看命令帮助\n/status 查看授权与 Bot 状态\n/bind <网页生成的6位验证码>\n/agents 查看可用 Agent\n/iperf <IP> <端口> [线程] [时长]\n\n在群组中首次使用会自动登记。私有模式仅响应已绑定用户；管理员可在网页将群组设为公共模式。', parse_mode: 'HTML' });
+}
+
+async function sendStatus(chatId, user, chat) {
+  const agents = accessibleAgents(user);
+  const group = chat?.type === 'private' ? null : groupFor(chat.id);
+  const groupMode = group ? (group.mode === 'all_members' ? '公共模式' : '私有模式') : '私信';
+  const groupCount = user.role === 'admin'
+    ? Number(db.get('SELECT COUNT(*) AS count FROM telegram_groups')?.count || 0)
+    : Number(db.get('SELECT COUNT(*) AS count FROM telegram_groups WHERE owner_user_id = ?', user.id)?.count || 0);
+  await safeCall('sendMessage', {
+    chat_id: chatId,
+    text: `NetPilot Bot：在线\n授权账户：${user.displayName || user.username}（UID ${user.id}）\n会话模式：${groupMode}\n可用在线 Agent：${agents.length}\n已登记群组：${groupCount}`
+  });
 }
 
 async function startTestFromTelegram(chatId, telegramId, user, args) {
@@ -235,7 +254,7 @@ async function startTestFromTelegram(chatId, telegramId, user, args) {
     return;
   }
   const id = makeId();
-  const test = { id, chatId, telegramId, user, target, port, parallel, duration, agents, selected: new Set(), page: 0 };
+  const test = { id, chatId, telegramId, user, publicChatId: user.publicChatId || null, target, port, parallel, duration, agents, selected: new Set(), page: 0 };
   activeTests.set(id, test);
   const message = await safeCall('sendMessage', { chat_id: chatId, text: `请选择 Agent\n目标：${target}:${port}，${parallel} 线程，${duration} 秒`, reply_markup: selectionKeyboard(test) });
   test.messageId = message?.message_id;
@@ -362,7 +381,9 @@ async function callbackQuery(query) {
   const test = activeTests.get(data[1]);
   const expected = Number(data.at(-1));
   const currentUser = boundUser(query.from?.id);
-  if (!test || expected !== Number(query.from?.id) || test.telegramId !== expected || currentUser?.id !== test.user.id) {
+  const publicGroup = test?.publicChatId ? groupFor(test.publicChatId) : null;
+  const publicAuthorized = publicGroup?.mode === 'all_members' && publicGroup.owner_user_id === test?.user.id;
+  if (!test || expected !== Number(query.from?.id) || test.telegramId !== expected || (currentUser?.id !== test.user.id && !publicAuthorized)) {
     await safeCall('answerCallbackQuery', { callback_query_id: query.id, text: '无权操作此任务', show_alert: true });
     return;
   }
@@ -422,13 +443,7 @@ async function handleMessage(message) {
   const parts = text.split(/\s+/);
   const command = parts[0].split('@')[0].toLowerCase();
   let user = boundUser(from.id);
-  if (command === '/start' || command === '/help') {
-    if (user && chat.type !== 'private' && !canUseChat(message, user)) {
-      await safeCall('sendMessage', { chat_id: chat.id, text: '此群组当前不可用，或普通用户已登记过其他群组。' });
-      return;
-    }
-    return sendHelp(chat.id);
-  }
+  const requesterUser = user;
   if (command === '/bind') {
     const failure = bindFailures.get(from.id);
     if (failure && failure.blockedUntil > Date.now()) {
@@ -451,9 +466,22 @@ async function handleMessage(message) {
     await safeCall('sendMessage', { chat_id: chat.id, text: '绑定成功，现在可以使用 /agents 和 /iperf。' });
     return;
   }
-  user = boundUser(from.id);
-  if (!user) { await safeCall('sendMessage', { chat_id: chat.id, text: '请先在网页账户设置生成验证码，然后发送 /bind 验证码。' }); return; }
-  if (!canUseChat(message, user)) { await safeCall('sendMessage', { chat_id: chat.id, text: '此群组当前仅允许群组所有者使用。' }); return; }
+  if (!user && chat.type === 'private') {
+    await safeCall('sendMessage', { chat_id: chat.id, text: '未授权：请先登录网页端，在 Telegram 页面生成绑定码，然后发送 /bind 验证码。' });
+    return;
+  }
+  user = user || publicGroupUser(chat);
+  if (user && !requesterUser && chat.type !== 'private') user = { ...user, publicChatId: chat.id };
+  if (!user) {
+    await safeCall('sendMessage', { chat_id: chat.id, text: '未授权：请先在网页端绑定 Telegram。私有群组只响应已绑定用户。' });
+    return;
+  }
+  if (!canUseChat(message, user)) {
+    await safeCall('sendMessage', { chat_id: chat.id, text: '此群组当前不可用，或普通用户已登记过其他群组。' });
+    return;
+  }
+  if (command === '/start' || command === '/help') return sendHelp(chat.id);
+  if (command === '/status') return sendStatus(chat.id, user, chat);
   if (command === '/agents') {
     const agents = accessibleAgents(user);
     await safeCall('sendMessage', { chat_id: chat.id, text: agents.length ? agents.map((a) => `${a.name} - ${a.status}`).join('\n') : '没有可用的在线 Agent。' });
@@ -462,16 +490,40 @@ async function handleMessage(message) {
   if (command === '/iperf') return startTestFromTelegram(chat.id, from.id, user, parts.slice(1));
 }
 
+async function handleChatMember(update) {
+  const chat = update.chat;
+  if (!chat || chat.type === 'private') return;
+  const oldStatus = update.old_chat_member?.status;
+  const newStatus = update.new_chat_member?.status;
+  const activeStatuses = new Set(['member', 'administrator', 'restricted']);
+  if (activeStatuses.has(newStatus) && !activeStatuses.has(oldStatus)) {
+    const user = boundUser(update.from?.id);
+    if (!user) {
+      await safeCall('sendMessage', { chat_id: chat.id, text: 'Bot 已加入，但添加者尚未绑定 NetPilot。请先在网页 Telegram 页面完成绑定后发送 /status。' });
+      return;
+    }
+    const group = ensureGroup(chat, user);
+    if (!group) {
+      await safeCall('sendMessage', { chat_id: chat.id, text: '群组登记失败：普通用户最多登记一个群组，请先在网页 Telegram 页面移除旧群组。' });
+      return;
+    }
+    await safeCall('sendMessage', { chat_id: chat.id, text: '群组已登记为私有模式，仅已绑定 Telegram 的 NetPilot 用户可以调用。管理员可在网页切换为公共模式。' });
+  } else if (!activeStatuses.has(newStatus) && activeStatuses.has(oldStatus)) {
+    db.run('DELETE FROM telegram_groups WHERE chat_id = ?', chat.id);
+  }
+}
+
 async function poll(generation, botToken) {
   let offset = Number(api.getSettings().telegram_update_offset || 0);
   while (generation === botGeneration && bot && !stopping && token() === botToken) {
     try {
-      const updates = await call('getUpdates', { offset, timeout: 35, allowed_updates: ['message', 'callback_query'] });
+      const updates = await call('getUpdates', { offset, timeout: 35, allowed_updates: ['message', 'callback_query', 'my_chat_member'] });
       if (generation !== botGeneration || token() !== botToken) break;
       for (const update of updates) {
         offset = update.update_id + 1;
         if (update.callback_query) await callbackQuery(update.callback_query);
         else if (update.message) await handleMessage(update.message);
+        else if (update.my_chat_member) await handleChatMember(update.my_chat_member);
       }
       if (updates.length) db.run(`INSERT INTO settings (key, value, updated_at) VALUES ('telegram_update_offset', ?, ?)
                                   ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`, String(offset), db.now());
@@ -490,7 +542,16 @@ export async function startTelegramBot() {
   stopping = false;
   bot = { token: botToken };
   const me = await safeCall('getMe');
-  if (me) console.log(`[netpilot] telegram bot @${me.username} enabled`);
+  if (me) {
+    console.log(`[netpilot] telegram bot @${me.username} enabled`);
+    await safeCall('setMyCommands', { commands: [
+      { command: 'help', description: '查看命令帮助' },
+      { command: 'status', description: '查看授权与 Bot 状态' },
+      { command: 'bind', description: '绑定网页账户' },
+      { command: 'agents', description: '查看可用 Agent' },
+      { command: 'iperf', description: '发起 iperf3 测试' }
+    ] });
+  }
   globalThis.netpilotTelegramReload = async () => {
     stopping = true;
     bot = null;
@@ -505,4 +566,4 @@ export async function startTelegramBot() {
   }
 }
 
-export const telegramTest = { activeTests, callbackQuery, chartSvg, completeTelegramTask, finishTest, progressKeyboard, selectionKeyboard };
+export const telegramTest = { activeTests, callbackQuery, chartSvg, completeTelegramTask, finishTest, handleChatMember, handleMessage, progressKeyboard, selectionKeyboard };

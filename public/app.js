@@ -1,4 +1,4 @@
-const state = { user: null, agents: [], users: [], tests: [], telegramGroups: [], activeTestId: null, pollTimer: null, settingsLoaded: false, liveSocket: null };
+const state = { user: null, agents: [], users: [], tests: [], telegramGroups: [], telegram: null, activeTestId: null, pollTimer: null, settingsLoaded: false, liveSocket: null };
 const $ = (selector) => document.querySelector(selector);
 const $$ = (selector) => [...document.querySelectorAll(selector)];
 
@@ -173,7 +173,7 @@ async function showApp(user) {
   setView('tests');
   try {
     await loadAgents();
-    await Promise.all([loadTests(), user.role === 'admin' ? loadUsers() : Promise.resolve(), user.role === 'admin' ? loadTelegramGroups() : Promise.resolve()]);
+    await Promise.all([loadTests(), loadTelegramPage(), user.role === 'admin' ? loadUsers() : Promise.resolve()]);
   } catch (error) {
     console.error(error);
     toast(`数据加载失败：${error.message}`);
@@ -192,7 +192,7 @@ function setView(name) {
   if (name === 'settings' && state.user?.id !== 1) return;
   $$('.page').forEach((node) => { node.hidden = node.id !== `view-${name}`; });
   $('.sidebar nav').querySelectorAll('button').forEach((node) => node.classList.toggle('active', node.dataset.view === name));
-  $('#page-title').textContent = { tests: '网络性能测试', agents: 'Agent 管理', users: '用户管理', settings: '系统设置' }[name];
+  $('#page-title').textContent = { tests: '网络性能测试', agents: 'Agent 管理', telegram: 'Telegram 机器人', users: '用户管理', settings: '系统设置' }[name];
 }
 
 async function loadVersion(refresh = false) {
@@ -544,7 +544,7 @@ function renderTelegramGroups() {
   if (!state.telegramGroups.length) {
     const empty = document.createElement('p');
     empty.className = 'empty-choice';
-    empty.textContent = '暂无已登记群组。在群组中向 Bot 发送命令后会自动登记。';
+    empty.textContent = '暂无已登记群组。由已绑定用户把 Bot 加入群组后会自动登记。';
     container.appendChild(empty);
     return;
   }
@@ -556,24 +556,42 @@ function renderTelegramGroups() {
     input.value = String(group.chatId);
     input.checked = selected.has(String(group.chatId));
     const details = document.createElement('span');
-    details.textContent = `${group.title || group.chatId} · ${group.ownerName || `UID ${group.ownerUserId}`} · ${group.mode === 'all_members' ? '全员可用' : '仅群主可用'}`;
+    details.textContent = `${group.title || group.chatId} · ${group.ownerName || `UID ${group.ownerUserId}`} · ${group.mode === 'all_members' ? '公共模式' : '私有模式'}`;
     label.append(input, details);
     container.appendChild(label);
   }
 }
 
 async function loadTelegramGroups() {
-  if (state.user?.role !== 'admin') return;
-  const result = await api('/api/admin/telegram/groups');
-  state.telegramGroups = result.groups;
+  const result = await api('/api/telegram');
+  state.telegram = result;
+  state.telegramGroups = result.groups || [];
+  state.user.telegram = result.binding;
+  const botLink = $('#telegram-bot-link');
+  $('#telegram-page-status').textContent = result.bot.enabled ? '已连接' : '未启用';
+  botLink.textContent = result.bot.enabled ? `@${result.bot.username || 'Telegram Bot'}` : '未启用';
+  if (result.bot.enabled && result.bot.username) botLink.href = `https://t.me/${result.bot.username}`;
+  else botLink.removeAttribute('href');
+  $('#telegram-page-identity').textContent = result.binding ? `已绑定 @${result.binding.username || result.binding.telegramId}` : '未绑定';
+  $('#telegram-generate-code').hidden = Boolean(result.binding);
+  $('#telegram-generate-code').disabled = !result.bot.enabled;
+  $('#telegram-unbind').hidden = !result.binding;
+  if (result.binding) $('#telegram-page-bind-code-row').hidden = true;
+  $('#telegram-group-limit').textContent = state.user.role === 'admin'
+    ? '管理员可登记多个群组，并设置私有或公共模式。'
+    : `普通用户最多登记一个群组（当前 ${state.telegramGroups.length}/1），只能使用私有模式。`;
   renderTelegramGroups();
+}
+
+async function loadTelegramPage() {
+  await loadTelegramGroups();
 }
 
 async function updateTelegramGroups(method, payload) {
   const chatIds = selectedTelegramGroupIds();
   if (!chatIds.length) { toast('请先选择群组'); return; }
   try {
-    await api('/api/admin/telegram/groups' + (method === 'DELETE' ? '' : '/mode'), { method, body: JSON.stringify({ chatIds, ...payload }) });
+    await api('/api/telegram/groups' + (method === 'DELETE' ? '' : '/mode'), { method, body: JSON.stringify({ chatIds, ...payload }) });
     await loadTelegramGroups();
     toast(method === 'DELETE' ? '群组已移除' : '群组模式已更新');
   } catch (error) { toast(error.message); }
@@ -649,15 +667,15 @@ document.addEventListener('click', (event) => {
   if (!(event.target instanceof Element) || !event.target.closest('.account-shell')) closeAccountMenu();
 });
 
-$('#generate-telegram-code').addEventListener('click', async () => {
+async function generateTelegramBindCode(codeTarget, rowTarget) {
   try {
     const result = await api('/api/telegram/bind-code', { method: 'POST', body: '{}' });
-    $('#telegram-bind-code').textContent = result.code;
-    $('#telegram-bind-code-row').hidden = false;
+    $(codeTarget).textContent = result.code;
+    $(rowTarget).hidden = false;
   } catch (error) { toast(error.message); }
-});
+}
 
-$('#unbind-telegram').addEventListener('click', async () => {
+async function unbindTelegram() {
   if (!confirm('解除当前 Telegram 绑定？')) return;
   try {
     await api('/api/telegram/bind', { method: 'DELETE', body: '{}' });
@@ -665,9 +683,15 @@ $('#unbind-telegram').addEventListener('click', async () => {
     $('#profile-telegram-status').textContent = '未绑定';
     $('#generate-telegram-code').hidden = false;
     $('#unbind-telegram').hidden = true;
+    await loadTelegramPage();
     toast('Telegram 绑定已解除');
   } catch (error) { toast(error.message); }
-});
+}
+
+$('#generate-telegram-code').addEventListener('click', () => generateTelegramBindCode('#telegram-bind-code', '#telegram-bind-code-row'));
+$('#telegram-generate-code').addEventListener('click', () => generateTelegramBindCode('#telegram-page-bind-code', '#telegram-page-bind-code-row'));
+$('#unbind-telegram').addEventListener('click', unbindTelegram);
+$('#telegram-unbind').addEventListener('click', unbindTelegram);
 
 $('#profile-form').addEventListener('submit', async (event) => {
   event.preventDefault();
@@ -680,7 +704,7 @@ $('#profile-form').addEventListener('submit', async (event) => {
   if (newPassword && !$('#profile-current-password').value) { toast('修改密码需要填写当前密码'); return; }
   try {
     const result = await api('/api/me', { method: 'PATCH', body: JSON.stringify({ displayName: $('#profile-display-name').value, currentPassword: $('#profile-current-password').value, newPassword }) });
-    state.user = result.user;
+    state.user = { ...result.user, telegram: state.user.telegram };
     refreshAccount();
     $('#profile-dialog').close();
     toast('账户设置已保存');
@@ -692,6 +716,7 @@ $('.sidebar nav').addEventListener('click', (event) => {
   const target = event.target.closest('[data-view]');
   if (!target) return;
   setView(target.dataset.view);
+  if (target.dataset.view === 'telegram') loadTelegramPage().catch((error) => toast(error.message));
   if (target.dataset.view === 'settings' && !state.settingsLoaded) loadSettings().catch((error) => toast(error.message));
 });
 
@@ -713,6 +738,7 @@ $('#settings-form').addEventListener('submit', async (event) => {
       })
     });
     await loadSettings();
+    await loadTelegramPage();
     const botMessage = result.telegramBot?.enabled ? `，Telegram Bot @${result.telegramBot.username} 已连接` : '，Telegram Bot 未启用';
     toast(`系统设置已保存${botMessage}`);
   } catch (error) { toast(error.message); }

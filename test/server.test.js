@@ -31,10 +31,15 @@ async function waitForServer(child) {
 }
 
 async function request(base, path, options = {}, session = '') {
-  const response = await fetch(base + path, {
-    ...options,
-    headers: { 'content-type': 'application/json', ...(session ? { cookie: session } : {}), ...(options.headers || {}) }
-  });
+  let response;
+  try {
+    response = await fetch(base + path, {
+      ...options,
+      headers: { 'content-type': 'application/json', ...(session ? { cookie: session } : {}), ...(options.headers || {}) }
+    });
+  } catch (error) {
+    throw new Error(`${options.method || 'GET'} ${path} failed: ${error.message}`, { cause: error });
+  }
   return { response, body: await response.json() };
 }
 

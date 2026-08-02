@@ -262,6 +262,13 @@ func systemdManagedAgent() bool {
 	return exec.CommandContext(ctx, "systemctl", "cat", "netpilot-agent.service").Run() == nil
 }
 
+func systemdRunSupports(option string) bool {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	output, err := exec.CommandContext(ctx, "systemd-run", "--help").CombinedOutput()
+	return err == nil && strings.Contains(string(output), option)
+}
+
 func updateEnvironment(params updateParams) []string {
 	return append(os.Environ(),
 		"NETPILOT_REPO="+params.Repo,
@@ -270,24 +277,32 @@ func updateEnvironment(params updateParams) []string {
 	)
 }
 
-func updaterCommand(ctx context.Context, updateID, scriptPath string, params updateParams) *exec.Cmd {
+func updaterCommand(ctx context.Context, updateID, scriptPath string, params updateParams) (*exec.Cmd, bool) {
 	if systemdManagedAgent() {
 		unit := "netpilot-agent-update-" + safeUnitPattern.ReplaceAllString(updateID, "-")
-		args := []string{
-			"--wait",
-			"--pipe",
-			"--collect",
-			"--unit", unit,
-			"--setenv=NETPILOT_REPO=" + params.Repo,
-			"--setenv=NETPILOT_GITHUB_ACCEL=" + params.GithubAccel,
-			"--setenv=NETPILOT_UPDATE_MODE=auto",
-			"/bin/sh", scriptPath,
+		args := []string{"--unit", unit}
+		waitSupported := systemdRunSupports("--wait")
+		if waitSupported {
+			args = append(args, "--wait")
 		}
-		return exec.CommandContext(ctx, "systemd-run", args...)
+		if systemdRunSupports("--collect") {
+			args = append(args, "--collect")
+		}
+		args = append(args,
+			"/usr/bin/env",
+			"NETPILOT_REPO="+params.Repo,
+			"NETPILOT_GITHUB_ACCEL="+params.GithubAccel,
+			"NETPILOT_UPDATE_MODE=auto",
+			"/bin/sh", "-c", `script="$1"; /bin/sh "$script"; status=$?; rm -f "$script"; exit "$status"`, "netpilot-agent-update", scriptPath,
+		)
+		if !waitSupported {
+			return exec.Command("systemd-run", args...), true
+		}
+		return exec.CommandContext(ctx, "systemd-run", args...), false
 	}
 	cmd := exec.CommandContext(ctx, "sh", scriptPath)
 	cmd.Env = updateEnvironment(params)
-	return cmd
+	return cmd, false
 }
 
 func updateVersionFromLine(line string) string {
@@ -442,9 +457,19 @@ func executeUpdate(parent context.Context, c *client, updateID string, raw map[s
 		_ = c.send(message{Type: "agent.update.done", TaskID: updateID, Payload: map[string]any{"exitCode": 1, "oldVersion": oldVersion, "newVersion": oldVersion, "error": err.Error()}})
 		return
 	}
-	defer os.Remove(scriptPath)
 
-	cmd := updaterCommand(ctx, updateID, scriptPath, params)
+	cmd, detached := updaterCommand(ctx, updateID, scriptPath, params)
+	if detached {
+		if err := cmd.Start(); err != nil {
+			_ = os.Remove(scriptPath)
+			_ = c.send(message{Type: "agent.update.done", TaskID: updateID, Payload: map[string]any{"exitCode": 1, "oldVersion": oldVersion, "newVersion": oldVersion, "error": err.Error()}})
+			return
+		}
+		_ = cmd.Process.Release()
+		_ = c.send(message{Type: "agent.update.output", TaskID: updateID, Payload: map[string]any{"line": "Updater was handed off to systemd; waiting for the Agent to reconnect with the new version."}})
+		return
+	}
+	defer os.Remove(scriptPath)
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		_ = c.send(message{Type: "agent.update.done", TaskID: updateID, Payload: map[string]any{"exitCode": 1, "oldVersion": oldVersion, "newVersion": oldVersion, "error": err.Error()}})

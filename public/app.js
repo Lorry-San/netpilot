@@ -81,7 +81,8 @@ function renderAgentUpdateStatus(payload = {}) {
     showUpdateBanner(`自动更新成功：${name}，${oldVersion} → ${newVersion}。`, 'success');
   } else if (payload.success === false || payload.status === 'failed') {
     const reason = payload.error ? `原因：${payload.error}` : '请查看 Agent 主机日志或使用手动更新命令重试。';
-    showUpdateBanner(`自动更新失败：${name}，原版本 ${oldVersion}，更新后版本 ${newVersion}。${reason}`, 'danger');
+    const output = payload.output ? ` 输出：${String(payload.output).split('\n').filter(Boolean).slice(-4).join(' / ').slice(0, 420)}` : '';
+    showUpdateBanner(`自动更新失败：${name}，原版本 ${oldVersion}，更新后版本 ${newVersion}。${reason}${output}`, 'danger');
   }
 }
 

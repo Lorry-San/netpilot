@@ -12,7 +12,7 @@ const port = Number(process.env.PORT || 8080);
 const publicBaseUrl = (process.env.PUBLIC_BASE_URL || `http://localhost:${port}`).replace(/\/$/, '');
 const githubRepo = process.env.GITHUB_REPO || 'Lorry-San/netpilot';
 const sessionTtlMs = 24 * 60 * 60 * 1000;
-const minimumAgentAutoUpdateVersion = '0.1.5';
+const minimumAgentAutoUpdateVersion = '0.1.7';
 const agentConnections = new Map();
 const agentUpdateJobs = new Map();
 const agentUpdateByAgent = new Map();
@@ -311,7 +311,7 @@ function completeAgentUpdate(updateId, success, details = {}) {
     output: details.output || job.output.slice(-30).join('\n')
   };
   broadcastAgentUpdate(job.agentId, payload);
-  audit(job.userId, success ? 'agent.update.success' : 'agent.update.failed', job.agentId, { oldVersion: payload.oldVersion, newVersion: payload.newVersion, error: payload.error });
+  audit(job.userId, success ? 'agent.update.success' : 'agent.update.failed', job.agentId, { oldVersion: payload.oldVersion, newVersion: payload.newVersion, error: payload.error, output: payload.output });
 }
 
 function maybeCompleteReconnectUpdate(agentId, newVersion) {

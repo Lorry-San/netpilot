@@ -1,6 +1,6 @@
 {
   "name": "netpilot",
-  "version": "0.1.6",
+  "version": "0.1.7",
   "private": false,
   "description": "Web-controlled iperf3 testing platform with Go agents",
   "license": "AGPL-3.0-only",

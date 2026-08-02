@@ -59,6 +59,9 @@ test('static assets and installer script are served', async (t) => {
   assert.match(indexHtml, /id="current-version"/);
   assert.match(indexHtml, /id="update-agent-panel"/);
   assert.match(indexHtml, /id="agent-update-command"/);
+  assert.match(indexHtml, /id="test-reverse"[^>]*checked/);
+  assert.match(indexHtml, /id="test-duration"[^>]*value="10"/);
+  assert.match(indexHtml, /id="test-parallel"><option selected>1<\/option>/);
 
   for (const asset of ['/app.js', '/styles.css']) {
     const response = await fetch(base + asset);

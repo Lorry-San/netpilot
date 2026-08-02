@@ -46,9 +46,9 @@
             <label>执行 Agent<select id="test-agent" required></select></label>
             <div class="split"><label>目标 IP / 域名<input id="test-target" value="127.0.0.1" required></label><label>端口<input id="test-port" type="number" min="1" max="65535" value="5201" required></label></div>
             <fieldset><legend>传输协议</legend><div class="segmented"><label><input type="radio" name="protocol" value="tcp" checked>TCP</label><label><input type="radio" name="protocol" value="udp">UDP</label></div></fieldset>
-            <label class="switch-row"><span>反向测试 (-R)</span><input id="test-reverse" type="checkbox"></label>
-            <label>测试时长<input id="test-duration" type="number" min="1" max="3600" value="15"></label>
-            <label>并行流<select id="test-parallel"><option>1</option><option>2</option><option selected>4</option><option>8</option></select></label>
+            <label class="switch-row"><span>反向测试 (-R)</span><input id="test-reverse" type="checkbox" checked></label>
+            <label>测试时长<input id="test-duration" type="number" min="1" max="3600" value="10"></label>
+            <label>并行流<select id="test-parallel"><option selected>1</option><option>2</option><option>4</option><option>8</option></select></label>
             <label id="bandwidth-row" hidden>UDP 目标带宽<input id="test-bandwidth" value="100M"></label>
             <button id="start-test" class="primary" type="submit">开始测试</button>
           </form>

@@ -1,4 +1,4 @@
-﻿import assert from 'node:assert/strict';
+import assert from 'node:assert/strict';
 import { once } from 'node:events';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { createServer as createNetServer } from 'node:net';
@@ -47,6 +47,7 @@ test('static assets and installer script are served', async (t) => {
 
   const index = await fetch(`${base}/`);
   assert.equal(index.status, 200);
+  assert.equal(index.headers.get('cache-control'), 'no-cache');
   const indexHtml = await index.text();
   assert.match(indexHtml, /password/i);
 

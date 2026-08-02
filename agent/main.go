@@ -162,7 +162,7 @@ func normalizeTask(raw map[string]any) (taskParams, error) {
 }
 
 func iperfArgs(task taskParams) []string {
-	args := []string{"-c", task.Target, "-p", strconv.Itoa(task.Port), "-t", strconv.Itoa(task.Duration), "-P", strconv.Itoa(task.Parallel), "-i", "1"}
+	args := []string{"-c", task.Target, "-p", strconv.Itoa(task.Port), "-t", strconv.Itoa(task.Duration), "-P", strconv.Itoa(task.Parallel), "-i", "1", "--forceflush"}
 	if task.Protocol == "udp" {
 		args = append(args, "-u")
 		if task.Bandwidth != "" {

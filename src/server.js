@@ -269,7 +269,7 @@ function serveStatic(req, res, pathname) {
   const target = resolve(publicDir, file);
   if (!target.startsWith(publicDir) || !existsSync(target)) return false;
   const contentTypes = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.sh': 'text/plain; charset=utf-8' };
-  res.writeHead(200, { 'content-type': contentTypes[extname(target)] || 'application/octet-stream' });
+  res.writeHead(200, { 'content-type': contentTypes[extname(target)] || 'application/octet-stream', 'cache-control': 'no-cache' });
   res.end(readFileSync(target));
   return true;
 }

@@ -189,7 +189,7 @@ test('security invariants, roles and Agent installation lock', async (t) => {
   assert.equal(rotated.response.status, 200);
   const socket = new WebSocket(`ws://127.0.0.1:${port}/ws/agent`);
   await once(socket, 'open');
-  socket.send(JSON.stringify({ type: 'agent.auth', token: rotated.body.install.token, payload: { agentId: agentID, os: 'linux', arch: 'amd64', version: 'test' } }));
+  socket.send(JSON.stringify({ type: 'agent.auth', token: rotated.body.install.token, payload: { agentId: agentID, os: 'linux', arch: 'amd64', version: 'v0.1.4' } }));
   const [reply] = await once(socket, 'message');
   assert.equal(JSON.parse(reply.toString()).type, 'agent.auth.ok');
 
@@ -198,21 +198,25 @@ test('security invariants, roles and Agent installation lock', async (t) => {
 
   const uiSocket = new WebSocket(`ws://127.0.0.1:${port}/ws/ui`, { headers: { cookie: session } });
   await once(uiSocket, 'open');
+  const oldAgentAutoUpdate = await request(base, `/api/admin/agents/${agentID}/update`, { method: 'POST', body: '{}' }, session);
+  assert.equal(oldAgentAutoUpdate.response.status, 409);
+  assert.match(oldAgentAutoUpdate.body.error, /不支持网页自动更新/);
+  database.prepare("UPDATE agents SET version = 'v0.1.5' WHERE id = ?").run(agentID);
   const updateStartWait = waitForMessage(socket, (message) => message.type === 'agent.update.start', 3000, 'agent.update.start');
   const autoUpdate = await request(base, `/api/admin/agents/${agentID}/update`, { method: 'POST', body: '{}' }, session);
   assert.equal(autoUpdate.response.status, 202);
-  assert.equal(autoUpdate.body.update.oldVersion, 'test');
+  assert.equal(autoUpdate.body.update.oldVersion, 'v0.1.5');
   const updateStart = await updateStartWait;
   assert.match(updateStart.taskId, /^update_/);
   assert.equal(updateStart.payload.scriptUrl, 'https://downloads.example.com/update-agent.sh');
   assert.equal(updateStart.payload.repo, 'Lorry-San/netpilot');
   assert.equal(updateStart.payload.githubAccel, 'https://ghproxy.example.com/');
   const updateDoneWait = waitForMessage(uiSocket, (message) => message.type === 'agent.update' && message.payload?.status === 'success', 3000, 'ui agent.update success');
-  socket.send(JSON.stringify({ type: 'agent.update.started', taskId: updateStart.taskId, payload: { oldVersion: 'test' } }));
-  socket.send(JSON.stringify({ type: 'agent.update.output', taskId: updateStart.taskId, payload: { line: '>>> upgrading test -> v9.9.9' } }));
-  socket.send(JSON.stringify({ type: 'agent.update.done', taskId: updateStart.taskId, payload: { exitCode: 0, oldVersion: 'test', newVersion: 'v9.9.9' } }));
+  socket.send(JSON.stringify({ type: 'agent.update.started', taskId: updateStart.taskId, payload: { oldVersion: 'v0.1.5' } }));
+  socket.send(JSON.stringify({ type: 'agent.update.output', taskId: updateStart.taskId, payload: { line: '>>> upgrading v0.1.5 -> v9.9.9' } }));
+  socket.send(JSON.stringify({ type: 'agent.update.done', taskId: updateStart.taskId, payload: { exitCode: 0, oldVersion: 'v0.1.5', newVersion: 'v9.9.9' } }));
   const updateDone = await updateDoneWait;
-  assert.equal(updateDone.payload.oldVersion, 'test');
+  assert.equal(updateDone.payload.oldVersion, 'v0.1.5');
   assert.equal(updateDone.payload.newVersion, 'v9.9.9');
   assert.equal(database.prepare('SELECT version FROM agents WHERE id = ?').get(agentID).version, 'v9.9.9');
   uiSocket.close();
@@ -230,6 +234,8 @@ test('security invariants, roles and Agent installation lock', async (t) => {
   assert.deepEqual(assignedAgents.body.agents.map((agent) => agent.id), [agentID]);
   const badSelfPassword = await request(base, '/api/me', { method: 'PATCH', body: JSON.stringify({ displayName: 'Operator Renamed', currentPassword: 'wrong-password', newPassword: 'Operator-New-Password-2026' }) }, userSession);
   assert.equal(badSelfPassword.response.status, 403);
+  const uidMutation = await request(base, '/api/me', { method: 'PATCH', body: JSON.stringify({ uid: 1, displayName: 'Root Maybe' }) }, userSession);
+  assert.equal(uidMutation.response.status, 400);
   const selfProfile = await request(base, '/api/me', { method: 'PATCH', body: JSON.stringify({ displayName: 'Operator Renamed', currentPassword: 'Operator-Password-2026', newPassword: 'Operator-New-Password-2026' }) }, userSession);
   assert.equal(selfProfile.response.status, 200);
   assert.equal(selfProfile.body.user.displayName, 'Operator Renamed');
@@ -237,6 +243,8 @@ test('security invariants, roles and Agent installation lock', async (t) => {
   const userDetail = await request(base, `/api/users/${newUser.body.user.id}`, {}, session);
   assert.equal(userDetail.response.status, 200);
   assert.deepEqual(userDetail.body.user.agentIds, [agentID]);
+  const adminUidMutation = await request(base, `/api/users/${newUser.body.user.id}`, { method: 'PATCH', body: JSON.stringify({ id: 1, displayName: 'Root Maybe' }) }, session);
+  assert.equal(adminUidMutation.response.status, 400);
   const clearUserAgents = await request(base, `/api/users/${newUser.body.user.id}`, { method: 'PATCH', body: JSON.stringify({ displayName: 'Operator Limited', role: 'user', disabled: false, agentIds: [] }) }, session);
   assert.equal(clearUserAgents.response.status, 200);
   assert.deepEqual(clearUserAgents.body.user.agentIds, []);
@@ -261,7 +269,7 @@ test('security invariants, roles and Agent installation lock', async (t) => {
 
   const version = await request(base, '/api/system/version', {}, session);
   assert.equal(version.response.status, 200);
-  assert.equal(version.body.current, '0.1.5');
+  assert.equal(version.body.current, '0.1.6');
   assert.ok(Object.hasOwn(version.body, 'updateAvailable'));
 
   socket.close();

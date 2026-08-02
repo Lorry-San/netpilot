@@ -123,6 +123,8 @@ Administrators can open **Agent** and use either update path:
 - **Auto update** sends an authenticated WebSocket request to an online idle Agent. The page banner reports success or failure and includes the original and reported new version. Native `systemd` Agents are updated through a transient `systemd-run` unit when available, so the updater can survive the Agent service restart.
 - **Manual update** shows the root command to run on the Agent host. Use this for offline Agents, Docker Agents without host Docker access, or when automatic update fails.
 
+Agents older than `v0.1.5` do not understand the automatic update WebSocket request, so the server refuses auto-update for those Agents and asks you to run the manual update command once. After that first manual upgrade, future web-triggered auto-updates are available.
+
 Updating is blocked while the Agent is running an iperf test. The update does not rotate or expose the Agent token.
 
 The updater supports:

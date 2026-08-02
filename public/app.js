@@ -354,7 +354,8 @@ function renderAgents() {
     actions.className = 'row-actions';
     if (state.user.role === 'admin') {
       const connected = agent.status === 'online' || agent.status === 'busy';
-      actions.appendChild(button(agent.status === 'online' ? '自动更新' : (agent.status === 'busy' ? '忙碌中' : '离线不可自动'), 'secondary', () => requestAutoUpdate(agent), agent.status !== 'online'));
+      const autoUpdateLabel = agent.status === 'online' ? (agent.autoUpdateSupported === false ? '先手动更新' : '自动更新') : (agent.status === 'busy' ? '忙碌中' : '离线不可自动');
+      actions.appendChild(button(autoUpdateLabel, 'secondary', () => requestAutoUpdate(agent), agent.status !== 'online' || agent.autoUpdateSupported === false));
       actions.appendChild(button(agent.status === 'busy' ? '忙碌中' : '手动更新', 'secondary', async () => {
         try {
           const result = await api(`/api/admin/agents/${encodeURIComponent(agent.id)}/update-command`, { method: 'POST', body: '{}' });
@@ -535,8 +536,8 @@ function syncAgentAccessRows() {
 async function openEditUser(user) {
   const detail = Array.isArray(user.agentIds) ? user : (await api(`/api/users/${user.id}`)).user;
   $('#edit-user-id').value = detail.id;
-  $('#edit-uid').value = detail.id;
-  $('#edit-username').value = detail.username;
+  $('#edit-uid').textContent = detail.id;
+  $('#edit-username').textContent = detail.username;
   $('#edit-display-name').value = detail.displayName;
   $('#edit-role').value = detail.role;
   $('#edit-disabled').checked = detail.disabled;
@@ -550,8 +551,8 @@ async function openEditUser(user) {
 
 function openProfileDialog() {
   closeAccountMenu();
-  $('#profile-uid').value = state.user.id;
-  $('#profile-username').value = state.user.username;
+  $('#profile-uid').textContent = state.user.id;
+  $('#profile-username').textContent = state.user.username;
   $('#profile-display-name').value = state.user.displayName;
   $('#profile-current-password').value = '';
   $('#profile-new-password').value = '';

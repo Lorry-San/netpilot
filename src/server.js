@@ -12,6 +12,7 @@ const port = Number(process.env.PORT || 8080);
 const publicBaseUrl = (process.env.PUBLIC_BASE_URL || `http://localhost:${port}`).replace(/\/$/, '');
 const githubRepo = process.env.GITHUB_REPO || 'Lorry-San/netpilot';
 const sessionTtlMs = 24 * 60 * 60 * 1000;
+const minimumAgentAutoUpdateVersion = '0.1.5';
 const agentConnections = new Map();
 const agentUpdateJobs = new Map();
 const agentUpdateByAgent = new Map();
@@ -113,6 +114,7 @@ function agentView(agent) {
     os: agent.os,
     arch: agent.arch,
     version: agent.version,
+    autoUpdateSupported: supportsAgentAutoUpdate(agent.version),
     publicIp: agent.public_ip,
     ipLocation: agent.ip_location,
     cpuPercent: agent.cpu_percent,
@@ -196,6 +198,20 @@ function compareVersions(a, b) {
     if (diff !== 0) return diff;
   }
   return 0;
+}
+
+function normalizedSemver(value) {
+  const match = String(value || '').match(/^v?(\d+\.\d+\.\d+)(?:[-+].*)?$/);
+  return match ? match[1] : '';
+}
+
+function supportsAgentAutoUpdate(version) {
+  const semver = normalizedSemver(version);
+  return Boolean(semver) && compareVersions(semver, minimumAgentAutoUpdateVersion) >= 0;
+}
+
+function rejectsUidMutation(body) {
+  return Object.hasOwn(body, 'id') || Object.hasOwn(body, 'uid');
 }
 
 let latestReleaseCache = { checkedAt: 0, data: null };
@@ -343,6 +359,7 @@ function handleAgentUpdateMessage(agentId, message) {
 
 function startAgentUpdate(user, agent, baseUrl) {
   if (agent.status === 'busy') throw Object.assign(new Error('Agent 正在执行任务，任务结束后再自动更新'), { status: 409 });
+  if (!supportsAgentAutoUpdate(agent.version)) throw Object.assign(new Error(`该 Agent 版本为 ${agent.version || '未知'}，不支持网页自动更新；请先使用手动更新命令升级到 v${minimumAgentAutoUpdateVersion} 或更高版本`), { status: 409 });
   if (agentUpdateByAgent.has(agent.id)) throw Object.assign(new Error('该 Agent 已有自动更新任务正在进行'), { status: 409 });
   const connection = agentConnections.get(agent.id);
   if (!connection || connection.readyState !== WebSocket.OPEN) throw Object.assign(new Error('Agent 不在线，无法自动更新；请使用手动更新命令'), { status: 409 });
@@ -539,6 +556,7 @@ async function handleApi(req, res, pathname) {
   requireUser(user);
   if (req.method === 'PATCH' && pathname === '/api/me') {
     const body = await bodyJson(req);
+    if (rejectsUidMutation(body)) return json(res, 400, { error: 'UID 不允许修改' });
     const displayName = body.displayName === undefined ? user.display_name : validateDisplayName(body.displayName);
     if (!displayName) return json(res, 400, { error: '显示名称无效' });
     const fullUser = get('SELECT * FROM users WHERE id = ?', user.id);
@@ -684,6 +702,7 @@ async function handleApi(req, res, pathname) {
     const target = get('SELECT * FROM users WHERE id = ?', targetId);
     if (!target) return json(res, 404, { error: '用户不存在' });
     const body = await bodyJson(req);
+    if (rejectsUidMutation(body)) return json(res, 400, { error: 'UID 不允许修改' });
     if (targetId === 1 && (body.role && body.role !== 'admin' || body.disabled === true)) return json(res, 400, { error: 'uid=1 系统管理员不可降权或禁用' });
     const role = body.role === 'admin' ? 'admin' : body.role === 'user' ? 'user' : target.role;
     const disabled = typeof body.disabled === 'boolean' ? (body.disabled ? 1 : 0) : target.disabled;

@@ -126,8 +126,8 @@
   <dialog id="profile-dialog">
     <form id="profile-form" method="dialog">
       <div class="dialog-heading"><h2>账户设置</h2><button value="cancel" type="submit" formnovalidate class="icon-button" aria-label="关闭">×</button></div>
-      <label>UID<input id="profile-uid" readonly></label>
-      <label>用户名<input id="profile-username" readonly></label>
+      <div class="readonly-field"><span>UID</span><strong id="profile-uid">--</strong></div>
+      <div class="readonly-field"><span>用户名</span><strong id="profile-username">--</strong></div>
       <label>显示名称<input id="profile-display-name" required maxlength="80"></label>
       <label>当前密码<input id="profile-current-password" type="password" autocomplete="current-password" placeholder="修改密码时填写"></label>
       <label>新密码<input id="profile-new-password" type="password" minlength="12" autocomplete="new-password" placeholder="留空则不修改"></label>
@@ -170,8 +170,8 @@
     <form id="user-edit-form" method="dialog">
       <div class="dialog-heading"><h2>修改用户</h2><button value="cancel" type="submit" formnovalidate class="icon-button" aria-label="关闭">×</button></div>
       <input id="edit-user-id" type="hidden">
-      <label>UID<input id="edit-uid" readonly></label>
-      <label>用户名<input id="edit-username" readonly></label>
+      <div class="readonly-field"><span>UID</span><strong id="edit-uid">--</strong></div>
+      <div class="readonly-field"><span>用户名</span><strong id="edit-username">--</strong></div>
       <label>显示名称<input id="edit-display-name" required maxlength="80"></label>
       <label>角色<select id="edit-role"><option value="user">普通用户</option><option value="admin">管理员</option></select></label>
       <label class="switch-row"><span>禁用用户</span><input id="edit-disabled" type="checkbox"></label>

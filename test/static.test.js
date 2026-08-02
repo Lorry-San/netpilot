@@ -56,6 +56,8 @@ test('static assets and installer script are served', async (t) => {
   assert.match(indexHtml, /id="account-menu"/);
   assert.match(indexHtml, /id="profile-dialog"/);
   assert.match(indexHtml, /id="user-edit-dialog"/);
+  assert.doesNotMatch(indexHtml, /id="profile-uid"[^>]*input/);
+  assert.match(indexHtml, /class="readonly-field"><span>UID<\/span><strong id="profile-uid"/);
   assert.match(indexHtml, /id="update-banner"/);
   assert.match(indexHtml, /data-action="all"/);
   assert.match(indexHtml, /data-action="invert"/);
@@ -83,6 +85,8 @@ test('static assets and installer script are served', async (t) => {
   assert.match(appScript, /output\.append\(document\.createTextNode/);
   assert.match(appScript, /\/api\/me/);
   assert.match(appScript, /agent\.update/);
+  assert.match(appScript, /autoUpdateSupported/);
+  assert.match(appScript, /先手动更新/);
   assert.match(appScript, /\/update`/);
   assert.match(appScript, /selectedAgentIds/);
 

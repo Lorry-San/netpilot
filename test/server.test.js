@@ -354,7 +354,7 @@ test('security invariants, roles and Agent installation lock', async (t) => {
 
   const version = await request(base, '/api/system/version', {}, session);
   assert.equal(version.response.status, 200);
-  assert.equal(version.body.current, '0.1.20');
+  assert.equal(version.body.current, '0.1.21');
   assert.ok(Object.hasOwn(version.body, 'updateAvailable'));
 
   socket.close();

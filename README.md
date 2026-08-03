@@ -183,7 +183,7 @@ The running message shows the current Agent, per-test progress, output-line coun
 
 Adding the Bot to a group registers that group on the **Telegram Bot** page when the adding Telegram account is already bound. Sending a command also registers it as a fallback. Administrators can select several groups in one continuous list and set them to:
 
-- **Private**: only Telegram accounts bound to NetPilot can use the Bot, with their own Agent permissions.
+- **Private**: only Telegram accounts bound to NetPilot can use the Bot, with their own Agent permissions. Every `/iperf` Bot response in the group replaces the real target with `x.x.x.x`, including selection and progress messages, expandable raw output, errors and chart titles. The real target is still retained internally and sent to the Agent.
 - **Public**: every group member can use the Bot. Unbound members use the Agent permissions of the account that registered the group.
 
 Administrators can register any number of groups. A regular user can register one group and can keep it private or remove it. Only NetPilot administrators can enable public mode; all group changes are enforced again by the API.
@@ -244,7 +244,7 @@ The Agent authenticates with the first WSS frame:
     "agentId": "agent_example",
     "os": "linux",
     "arch": "amd64",
-    "version": "v0.1.20",
+    "version": "v0.1.21",
     "capabilities": ["iperf3", "nexttrace"],
     "nexttraceVersion": "v1.7.1"
   }

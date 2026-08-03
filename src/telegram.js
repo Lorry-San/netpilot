@@ -4,6 +4,7 @@ import { Resvg } from '@resvg/resvg-js';
 const api = globalThis.netpilotServerApi;
 const db = api?.db;
 const PAGE_SIZE = 4;
+const REDACTED_IP = 'x.x.x.x';
 const activeTests = new Map();
 const activeTraces = new Map();
 const bindFailures = new Map();
@@ -99,6 +100,27 @@ function publicGroupUser(chat) {
   if (!group || group.mode !== 'all_members') return null;
   return db.get(`SELECT id, username, display_name AS displayName, role, disabled
                  FROM users WHERE id = ? AND disabled = 0`, group.owner_user_id);
+}
+
+function shouldRedactIperfTarget(chat, user) {
+  if (!chat || chat.type === 'private' || !user) return false;
+  const group = groupFor(chat.id);
+  return group?.mode === 'members_only';
+}
+
+function iperfDisplayTarget(test, fallback = '') {
+  return test?.redactTarget ? REDACTED_IP : String(test?.target || fallback || '');
+}
+
+function redactIperfTargetText(value, test, fallbackTarget = '') {
+  let text = String(value ?? '');
+  if (!test?.redactTarget) return text;
+  const targets = new Set([test.target, fallbackTarget].map((target) => String(target || '').trim()).filter(Boolean));
+  for (const target of targets) {
+    const escaped = target.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    text = text.replace(new RegExp(escaped, 'gi'), REDACTED_IP);
+  }
+  return text;
 }
 
 function accessibleAgents(user, capability = '') {
@@ -233,9 +255,13 @@ function formatTimestamp(value) {
   return new Intl.DateTimeFormat('zh-CN', { timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false }).format(new Date(value)).replaceAll('/', '-');
 }
 
-async function sendChart(chatId, view, batchStartedAt, replyToMessageId) {
+function iperfChartSvg(view, test) {
+  return chartSvg(view.metrics, { title: `${view.agentName} - ${iperfDisplayTarget(test, view.target)}:${view.port}` });
+}
+
+async function sendChart(chatId, view, batchStartedAt, replyToMessageId, test) {
   if (!view.metrics.length) return false;
-  const svg = chartSvg(view.metrics, { title: `${view.agentName} - ${view.target}:${view.port}` });
+  const svg = iperfChartSvg(view, test);
   try {
     const png = new Resvg(svg, { fitTo: { mode: 'width', value: Math.min(2400, Math.max(1440, view.metrics.length * 100)) } }).render().asPng();
     const timestamp = new Date(view.finishedAt || Date.now()).toISOString().replaceAll(':', '-').replace(/\.\d{3}Z$/, 'Z');
@@ -248,14 +274,14 @@ async function sendChart(chatId, view, batchStartedAt, replyToMessageId) {
   }
 }
 
-function resultText(view) {
+function resultText(view, test) {
   const status = view.status === 'completed' ? '完成' : view.status === 'cancelled' ? '已取消' : '失败';
   const last = view.metrics.at(-1);
   const rate = Number(last?.sendMbps || last?.recvMbps || 0).toFixed(2);
-  const raw = view.output.map((line) => line.line).join('\n');
+  const raw = redactIperfTargetText(view.output.map((line) => line.line).join('\n'), test, view.target);
   const tail = raw.length > 3200 ? `…${raw.slice(-3200)}` : raw;
   const duration = formatDuration(elapsedMs(view.createdAt, view.finishedAt));
-  return `测试${status}\nAgent：${esc(view.agentName)}\n目标：${esc(view.target)}:${view.port}\n协议：${view.protocol.toUpperCase()}${view.reverse ? ' -R' : ''}\n设定时长：${view.duration}s\n测试耗时：${duration}\n完成时间：${formatTimestamp(view.finishedAt)}\n末速：${rate} Mbps\n\n<blockquote expandable>${esc(tail || '无原始输出')}</blockquote>`;
+  return `测试${status}\nAgent：${esc(view.agentName)}\n目标：${esc(iperfDisplayTarget(test, view.target))}:${view.port}\n协议：${view.protocol.toUpperCase()}${view.reverse ? ' -R' : ''}\n设定时长：${view.duration}s\n测试耗时：${duration}\n完成时间：${formatTimestamp(view.finishedAt)}\n末速：${rate} Mbps\n\n<blockquote expandable>${esc(tail || '无原始输出')}</blockquote>`;
 }
 
 async function sendHelp(chatId, replyToMessageId) {
@@ -414,6 +440,7 @@ async function startTestFromTelegram(chat, telegramId, user, args, replyToMessag
   const test = {
     id, chatId: chat.id, chatType: chat.type, telegramId, user, publicChatId: user.publicChatId || null,
     target, port, parallel, duration, reverse, directionRequired: interactive, targetRequired: interactive,
+    redactTarget: shouldRedactIperfTarget(chat, user),
     replyToMessageId, agents, selected: new Set(), page: 0, state: 'selecting', createdAt: Date.now()
   };
   activeTests.set(id, test);
@@ -421,7 +448,7 @@ async function startTestFromTelegram(chat, telegramId, user, args, replyToMessag
     chat_id: chat.id,
     text: interactive
       ? '请选择 Agent\n选择完成后继续设置上行或下行测试。'
-      : `请选择 Agent\n目标：${target}:${port}，${parallel} 线程，${duration} 秒${reverse ? '，下行测试 (-R)' : '，上行测试'}`,
+      : `请选择 Agent\n目标：${iperfDisplayTarget(test)}:${port}，${parallel} 线程，${duration} 秒${reverse ? '，下行测试 (-R)' : '，上行测试'}`,
     reply_markup: selectionKeyboard(test),
     ...replyTo(replyToMessageId)
   });
@@ -476,7 +503,7 @@ function processedCount(test) {
 function progressText(test) {
   const processed = processedCount(test);
   const total = test.selectedAgents.length;
-  const taskLabel = `${test.target}:${test.port}${test.reverse ? ' -R' : ''}`;
+  const taskLabel = `${iperfDisplayTarget(test)}:${test.port}${test.reverse ? ' -R' : ''}`;
   if (!test.currentTaskId || !test.currentAgent) {
     return `🎯 任务提交成功，正在处理……\n任务：${taskLabel}\n已选项：${total}\n\n等待下一个 Agent……`;
   }
@@ -506,7 +533,7 @@ async function finalizeBatch(test) {
   const successful = test.results.filter((item) => item.status === 'completed').length;
   const failed = test.results.length - successful + test.errors.length;
   const title = test.stopRequested ? '测试已中止' : '全部测试已结束';
-  const errorText = test.errors.length ? `\n未完成：${test.errors.map((item) => `${item.agent.name}（${item.error}）`).join('；').slice(0, 2500)}` : '';
+  const errorText = test.errors.length ? `\n未完成：${redactIperfTargetText(test.errors.map((item) => `${item.agent.name}（${item.error}）`).join('；'), test).slice(0, 2500)}` : '';
   await safeCall('editMessageText', {
     chat_id: test.chatId,
     message_id: test.messageId,
@@ -592,8 +619,8 @@ async function completeTelegramTask(task, view) {
   if (!test) return;
   const itemElapsed = elapsedMs(view.createdAt, view.finishedAt);
   test.results.push({ agent: test.currentAgent, status: view.status, elapsed: itemElapsed });
-  await safeCall('sendMessage', { chat_id: test.chatId, text: resultText(view), parse_mode: 'HTML', ...replyTo(test.replyToMessageId) });
-  await sendChart(test.chatId, view, test.startedAt, test.replyToMessageId);
+  await safeCall('sendMessage', { chat_id: test.chatId, text: resultText(view, test), parse_mode: 'HTML', ...replyTo(test.replyToMessageId) });
+  await sendChart(test.chatId, view, test.startedAt, test.replyToMessageId, test);
   test.currentTaskId = null;
   test.currentAgent = null;
   if (test.stopRequested) return finalizeBatch(test);
@@ -973,4 +1000,4 @@ export async function startTelegramBot() {
   }
 }
 
-export const telegramTest = { activeTests, activeTraces, beginSelectedTest, callbackQuery, chartSvg, completeTelegramTask, completeTelegramTrace, directionKeyboard, finishTest, handleChatMember, handleMessage, parseIperfArgs, parseNextTraceArgs, parseTargetInput, privateTargetKeyboard, progressKeyboard, selectionKeyboard, traceSelectionKeyboard };
+export const telegramTest = { activeTests, activeTraces, beginSelectedTest, callbackQuery, chartSvg, completeTelegramTask, completeTelegramTrace, directionKeyboard, finishTest, handleChatMember, handleMessage, iperfChartSvg, iperfDisplayTarget, parseIperfArgs, parseNextTraceArgs, parseTargetInput, privateTargetKeyboard, progressKeyboard, redactIperfTargetText, resultText, selectionKeyboard, traceSelectionKeyboard };

@@ -162,6 +162,97 @@ test('Telegram multi-Agent tests run serially and upload charts as documents', a
   }
 });
 
+test('Telegram private groups redact iperf targets for every caller, including the group owner', async () => {
+  const originalApi = globalThis.netpilotServerApi;
+  const originalFetch = globalThis.fetch;
+  const requests = [];
+  const uploads = [];
+  const created = [];
+  const target = '203.0.113.25';
+  let groupMode = 'members_only';
+  globalThis.netpilotServerApi = {
+    db: {
+      get(sql) {
+        if (sql.includes('FROM telegram_users')) return { id: 1, username: 'admin', displayName: 'System Admin', role: 'admin', disabled: 0 };
+        if (sql.startsWith('SELECT * FROM telegram_groups')) return { chat_id: -1001, title: 'Private Group', owner_user_id: 1, mode: groupMode };
+        if (sql.includes('SELECT second')) return { second: 1 };
+        if (sql.includes('COUNT(*)')) return { count: 1 };
+        return null;
+      },
+      all() { return [{ id: 'agent_one', name: 'Agent One', status: 'online' }]; },
+      run() {},
+      now() { return new Date().toISOString(); }
+    },
+    getSettings() { return { telegram_bot_token: '123456789:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA' }; },
+    createTest(_user, body) {
+      created.push(body);
+      return { id: 'task_private_group', agent_id: body.agentId };
+    },
+    audit() {}
+  };
+  globalThis.fetch = async (url, options) => {
+    if (options.body instanceof FormData) uploads.push({ url: String(url), body: options.body });
+    else requests.push({ url: String(url), body: JSON.parse(options.body) });
+    return { ok: true, status: 200, async json() { return { ok: true, result: { message_id: 9 } }; } };
+  };
+
+  let telegramTest;
+  try {
+    ({ telegramTest } = await import(`../src/telegram.js?private-redaction=${Date.now()}`));
+    await telegramTest.handleMessage({ message_id: 700, from: { id: 42 }, chat: { id: -1001, type: 'group', title: 'Private Group' }, text: `/iperf ${target}` });
+    const picker = requests.find((request) => request.url.endsWith('/sendMessage'));
+    assert.match(picker.body.text, /x\.x\.x\.x:5201/);
+    assert.doesNotMatch(picker.body.text, new RegExp(target.replaceAll('.', '\\.')));
+
+    const pending = [...telegramTest.activeTests.values()][0];
+    assert.equal(pending.redactTarget, true);
+    await telegramTest.callbackQuery({ id: 'private-toggle', from: { id: 42 }, data: `tg:${pending.id}:toggle:agent_one:42` });
+    await telegramTest.callbackQuery({ id: 'private-done', from: { id: 42 }, data: `tg:${pending.id}:done:42` });
+    assert.equal(created[0].target, target);
+    const progress = requests.find((request) => request.url.endsWith('/editMessageText') && request.body.text.includes('任务：'));
+    assert.match(progress.body.text, /任务：x\.x\.x\.x:5201/);
+    assert.doesNotMatch(progress.body.text, new RegExp(target.replaceAll('.', '\\.')));
+
+    const finishedAt = new Date().toISOString();
+    const view = {
+      status: 'completed', agentName: 'Agent One', target, port: 5201, protocol: 'tcp', reverse: false, duration: 10,
+      createdAt: new Date(Date.now() - 1000).toISOString(), finishedAt,
+      metrics: [{ second: 1, sendMbps: 100, recvMbps: 100 }],
+      output: [
+        { line: `Connecting to host ${target}, port 5201` },
+        { line: `[  5] local 192.0.2.50 connected to ${target} port 5201` }
+      ]
+    };
+    const result = telegramTest.resultText(view, pending);
+    const svg = telegramTest.iperfChartSvg(view, pending);
+    assert.match(result, /目标：x\.x\.x\.x:5201/);
+    assert.doesNotMatch(result, new RegExp(target.replaceAll('.', '\\.')));
+    assert.match(svg, /x\.x\.x\.x:5201/);
+    assert.doesNotMatch(svg, new RegExp(target.replaceAll('.', '\\.')));
+
+    await telegramTest.completeTelegramTask({ id: 'task_private_group' }, view);
+    const finalMessage = requests.find((request) => request.url.endsWith('/sendMessage') && request.body.parse_mode === 'HTML');
+    assert.match(finalMessage.body.text, /x\.x\.x\.x:5201/);
+    assert.doesNotMatch(finalMessage.body.text, new RegExp(target.replaceAll('.', '\\.')));
+    assert.equal(uploads.length, 1);
+    assert.ok(uploads[0].body.get('document') instanceof Blob);
+
+    groupMode = 'all_members';
+    requests.length = 0;
+    await telegramTest.handleMessage({ message_id: 701, from: { id: 42 }, chat: { id: -1001, type: 'group', title: 'Public Group' }, text: `/iperf ${target}` });
+    const publicPicker = requests.find((request) => request.url.endsWith('/sendMessage'));
+    assert.match(publicPicker.body.text, new RegExp(target.replaceAll('.', '\\.')));
+    assert.equal([...telegramTest.activeTests.values()][0].redactTarget, false);
+  } finally {
+    if (telegramTest) {
+      for (const pending of telegramTest.activeTests.values()) clearInterval(pending.timer);
+      telegramTest.activeTests.clear();
+    }
+    globalThis.netpilotServerApi = originalApi;
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test('Telegram interactive mode chooses direction before accepting the target in private chat', async () => {
   const originalApi = globalThis.netpilotServerApi;
   const originalFetch = globalThis.fetch;

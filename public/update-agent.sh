@@ -7,6 +7,8 @@ MODE="${NETPILOT_UPDATE_MODE:-auto}"
 BINARY="${NETPILOT_AGENT_BINARY:-/usr/local/bin/netpilot-agent}"
 CONTAINER="${NETPILOT_AGENT_CONTAINER:-netpilot-agent}"
 NEXTTRACE_VERSION="v1.7.1"
+NEXTTRACE_BINARY="${NETPILOT_NEXTTRACE_BINARY:-/usr/local/bin/nexttrace}"
+NEXTTRACE_LICENSE="${NETPILOT_NEXTTRACE_LICENSE:-/usr/share/licenses/nexttrace/LICENSE}"
 umask 077
 
 if [ -n "$ACCEL" ] && [ "${ACCEL%/}" = "$ACCEL" ]; then ACCEL="${ACCEL}/"; fi
@@ -133,9 +135,9 @@ update_native() {
   old_version="$($BINARY --version 2>/dev/null || echo unknown)"
   new_version="$($NEW_BINARY --version)"
   if [ "$old_version" = "$new_version" ]; then
-    mv "$TEMP_DIR/nexttrace" /usr/local/bin/nexttrace
-    mkdir -p /usr/share/licenses/nexttrace
-    mv "$TEMP_DIR/NEXTTRACE-LICENSE" /usr/share/licenses/nexttrace/LICENSE
+    mkdir -p "$(dirname "$NEXTTRACE_BINARY")" "$(dirname "$NEXTTRACE_LICENSE")"
+    mv "$TEMP_DIR/nexttrace" "$NEXTTRACE_BINARY"
+    mv "$TEMP_DIR/NEXTTRACE-LICENSE" "$NEXTTRACE_LICENSE"
     echo ">>> NetPilot Agent is already up to date (${new_version})"
     exit 0
   fi
@@ -143,9 +145,9 @@ update_native() {
 
   ROLLBACK="native"
   service_stop
-  mv "$TEMP_DIR/nexttrace" /usr/local/bin/nexttrace
-  mkdir -p /usr/share/licenses/nexttrace
-  mv "$TEMP_DIR/NEXTTRACE-LICENSE" /usr/share/licenses/nexttrace/LICENSE
+  mkdir -p "$(dirname "$NEXTTRACE_BINARY")" "$(dirname "$NEXTTRACE_LICENSE")"
+  mv "$TEMP_DIR/nexttrace" "$NEXTTRACE_BINARY"
+  mv "$TEMP_DIR/NEXTTRACE-LICENSE" "$NEXTTRACE_LICENSE"
   mv "$BINARY" "$BACKUP_BINARY"
   mv "$NEW_BINARY" "$BINARY"
   service_start

@@ -111,6 +111,9 @@ legend { margin-bottom: 6px; color: var(--muted); }
 .trace-hop-table td:first-child, .trace-hop-table th:first-child { width: 46px; text-align: center; }
 .trace-hop-table td strong, .trace-hop-table td small { display: block; }
 .trace-hop-table td small { margin-top: 3px; color: var(--muted); }
+.trace-network { min-width: 210px; }
+.trace-network-primary { color: var(--text); font-size: 14px; font-weight: 650; line-height: 1.35; }
+.trace-network-secondary { max-width: 520px; color: var(--muted); font-size: 12px; font-weight: 400; line-height: 1.35; white-space: nowrap; }
 .trace-rtts { display: flex; flex-wrap: wrap; gap: 4px 9px; white-space: nowrap; font-family: "Cascadia Code", Consolas, monospace; }
 #trace-raw-output { min-height: 380px; max-height: 560px; }
 #traces-body tr { cursor: pointer; }

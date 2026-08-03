@@ -75,7 +75,7 @@ test('static assets and installer script are served', async (t) => {
   assert.match(indexHtml, /id="view-traces"/);
   assert.match(indexHtml, /id="trace-packet-size"/);
   assert.match(indexHtml, /id="setting-nexttrace-provider"/);
-  assert.match(indexHtml, /\/app\.js\?v=0\.1\.19/);
+  assert.match(indexHtml, /\/app\.js\?v=0\.1\.20/);
   assert.match(indexHtml, /id="generate-telegram-code"/);
   assert.match(indexHtml, /id="telegram-group-choices"/);
   assert.match(indexHtml, /id="telegram-groups-all-members"/);
@@ -106,6 +106,8 @@ test('static assets and installer script are served', async (t) => {
   assert.match(appScript, /\/api\/telegram\/groups/);
   assert.match(appScript, /\/api\/traces/);
   assert.match(appScript, /trace\.hop/);
+  assert.match(appScript, /traceNetworkParts/);
+  assert.match(appScript, /trace-network-secondary/);
 
   const installer = await fetch(`${base}/install-agent.sh`);
   assert.equal(installer.status, 200);

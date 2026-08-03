@@ -492,6 +492,38 @@ function traceProtocolLabel(trace) {
   return `${String(trace.protocol || 'icmp').toUpperCase()}${trace.port ? `:${trace.port}` : ''}`;
 }
 
+function traceNetworkParts(hop) {
+  const details = String(hop.details || '').trim();
+  const asn = String(hop.asn || '').trim();
+  let remainder = details;
+  if (asn) remainder = remainder.replace(new RegExp(`^${asn}\\b`, 'i'), '').trim();
+
+  const labels = [];
+  while (remainder.startsWith('[')) {
+    const match = remainder.match(/^\[[^\]]+\]/);
+    if (!match) break;
+    labels.push(match[0]);
+    remainder = remainder.slice(match[0].length).trim();
+  }
+
+  let marker = asn;
+  if (!marker && remainder.startsWith('*')) {
+    marker = '*';
+    remainder = remainder.slice(1).trim();
+    while (remainder.startsWith('[')) {
+      const match = remainder.match(/^\[[^\]]+\]/);
+      if (!match) break;
+      labels.push(match[0]);
+      remainder = remainder.slice(match[0].length).trim();
+    }
+  }
+
+  return {
+    primary: [marker, ...labels].filter(Boolean).join(' ') || details,
+    secondary: marker || labels.length ? remainder : ''
+  };
+}
+
 function renderTraceHops(hops = []) {
   const body = $('#trace-hops-body');
   clear(body);
@@ -504,9 +536,18 @@ function renderTraceHops(hops = []) {
     node.appendChild(address);
     if (hop.hostname) { const hostname = document.createElement('small'); hostname.textContent = hop.hostname; node.appendChild(hostname); }
     const network = document.createElement('div');
-    const details = document.createElement('strong');
-    details.textContent = hop.asn || hop.details || (hop.address === '*' ? '本跳未响应' : '');
-    network.appendChild(details);
+    network.className = 'trace-network';
+    const networkParts = traceNetworkParts(hop);
+    const primary = document.createElement('strong');
+    primary.className = 'trace-network-primary';
+    primary.textContent = networkParts.primary || (hop.address === '*' ? '本跳未响应' : '');
+    network.appendChild(primary);
+    if (networkParts.secondary) {
+      const secondary = document.createElement('small');
+      secondary.className = 'trace-network-secondary';
+      secondary.textContent = networkParts.secondary;
+      network.appendChild(secondary);
+    }
     const rtt = document.createElement('div');
     rtt.className = 'trace-rtts';
     for (const value of rtts) { const span = document.createElement('span'); span.textContent = value === null ? '*' : `${Number(value).toFixed(2)} ms`; rtt.appendChild(span); }

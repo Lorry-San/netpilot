@@ -238,7 +238,7 @@ The Agent authenticates with the first WSS frame:
     "agentId": "agent_example",
     "os": "linux",
     "arch": "amd64",
-    "version": "v0.1.19",
+    "version": "v0.1.20",
     "capabilities": ["iperf3", "nexttrace"],
     "nexttraceVersion": "v1.7.1"
   }

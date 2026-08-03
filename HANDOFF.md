@@ -9,8 +9,8 @@
 | GitHub | `Lorry-San/netpilot` |
 | 默认分支 | `main` |
 | 许可证 | `AGPL-3.0-only` |
-| 交接版本 | `v0.1.22` |
-| 交接提交 | `cc1f9a9cbd1f93ec3dc3a6e16eb255760ea7741d` |
+| 交接版本 | `v0.1.23` |
+| 交接提交 | `v0.1.23` 标签指向的发布提交 |
 | 核对日期 | 2026-08-03（Asia/Shanghai） |
 | 生产站点 | `https://iperf.nbiepl.cloud` |
 | 生产主机 | `103.240.198.97` |

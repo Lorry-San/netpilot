@@ -118,6 +118,9 @@ test('security invariants, roles and Agent installation lock', async (t) => {
   database = new DatabaseSync(dbPath);
   database.exec('PRAGMA busy_timeout = 3000;');
   assert.ok(database.prepare('PRAGMA table_info(agents)').all().some((column) => column.name === 'deleted_at'));
+  assert.ok(database.prepare('PRAGMA table_info(agents)').all().some((column) => column.name === 'capabilities'));
+  assert.ok(database.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'trace_tasks'").get());
+  assert.ok(database.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'trace_hops'").get());
   assert.ok(database.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'telegram_users'").get());
   assert.ok(database.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'telegram_groups'").get());
   assert.ok(database.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'telegram_bind_codes'").get());
@@ -143,7 +146,9 @@ test('security invariants, roles and Agent installation lock', async (t) => {
     githubAccelDomain: '',
     telegramBotToken: '',
     telegramBotEnabled: false,
-    telegramBotUsername: ''
+    telegramBotUsername: '',
+    nexttraceDataProvider: 'disable-geoip',
+    nexttraceMapEnabled: false
   });
   const invalidSettings = await request(base, '/api/settings', {
     method: 'PUT',
@@ -156,7 +161,9 @@ test('security invariants, roles and Agent installation lock', async (t) => {
       agentWsBase: 'wss://agents.example.com:8443/',
       scriptBase: 'https://downloads.example.com/',
       githubAccelEnabled: true,
-      githubAccelDomain: 'https://ghproxy.example.com/'
+      githubAccelDomain: 'https://ghproxy.example.com/',
+      nexttraceDataProvider: 'disable-geoip',
+      nexttraceMapEnabled: false
     })
   }, session);
   assert.equal(savedSettings.response.status, 200);
@@ -168,7 +175,9 @@ test('security invariants, roles and Agent installation lock', async (t) => {
     githubAccelDomain: 'https://ghproxy.example.com',
     telegramBotToken: '',
     telegramBotEnabled: false,
-    telegramBotUsername: ''
+    telegramBotUsername: '',
+    nexttraceDataProvider: 'disable-geoip',
+    nexttraceMapEnabled: false
   });
   const invalidTelegramToken = await request(base, '/api/settings', {
     method: 'PUT',
@@ -216,7 +225,7 @@ test('security invariants, roles and Agent installation lock', async (t) => {
   assert.equal(rotated.response.status, 200);
   const socket = new WebSocket(`ws://127.0.0.1:${port}/ws/agent`);
   await once(socket, 'open');
-  socket.send(JSON.stringify({ type: 'agent.auth', token: rotated.body.install.token, payload: { agentId: agentID, os: 'linux', arch: 'amd64', version: 'v0.1.4' } }));
+  socket.send(JSON.stringify({ type: 'agent.auth', token: rotated.body.install.token, payload: { agentId: agentID, os: 'linux', arch: 'amd64', version: 'v0.1.4', capabilities: ['iperf3', 'nexttrace'], nexttraceVersion: 'v1.7.1' } }));
   const [reply] = await once(socket, 'message');
   assert.equal(JSON.parse(reply.toString()).type, 'agent.auth.ok');
 
@@ -317,9 +326,31 @@ test('security invariants, roles and Agent installation lock', async (t) => {
   const adminForbiddenSettings = await request(base, '/api/settings', {}, secondAdminSession);
   assert.equal(adminForbiddenSettings.response.status, 403);
 
+  const privateTrace = await request(base, '/api/traces', { method: 'POST', body: JSON.stringify({ agentId: agentID, target: '10.0.0.1' }) }, userSession);
+  assert.equal(privateTrace.response.status, 403);
+  const traceStartWait = waitForMessage(socket, (message) => message.type === 'trace.start', 3000, 'trace.start');
+  const traceCreated = await request(base, '/api/traces', {
+    method: 'POST',
+    body: JSON.stringify({ agentId: agentID, target: '1.1.1.1', protocol: 'icmp', addressFamily: 'ipv4', queries: 3, maxHops: 30, timeoutMs: 1000, parallelRequests: 18, packetSize: 64 })
+  }, userSession);
+  assert.equal(traceCreated.response.status, 201);
+  const traceStart = await traceStartWait;
+  assert.equal(traceStart.payload.packetSize, 64);
+  assert.equal(traceStart.payload.allowPrivate, false);
+  socket.send(JSON.stringify({ type: 'trace.stdout', taskId: traceStart.taskId, payload: { line: '1   203.0.113.1   AS64500  Example Network' } }));
+  socket.send(JSON.stringify({ type: 'trace.stdout', taskId: traceStart.taskId, payload: { line: '    gateway.example  1.20 ms / 1.30 ms / * ms' } }));
+  socket.send(JSON.stringify({ type: 'trace.done', taskId: traceStart.taskId, payload: { exitCode: 0, durationMs: 1200 } }));
+  await new Promise((resolvePromise) => setTimeout(resolvePromise, 60));
+  const traces = await request(base, '/api/traces', {}, userSession);
+  const completedTrace = traces.body.traces.find((trace) => trace.id === traceCreated.body.trace.id);
+  assert.equal(completedTrace.status, 'completed');
+  assert.deepEqual(completedTrace.hops[0].rtts, [1.2, 1.3, null]);
+  assert.equal(completedTrace.hops[0].hostname, 'gateway.example');
+  assert.equal(completedTrace.hops[0].asn, 'AS64500');
+
   const version = await request(base, '/api/system/version', {}, session);
   assert.equal(version.response.status, 200);
-  assert.equal(version.body.current, '0.1.17');
+  assert.equal(version.body.current, '0.1.18');
   assert.ok(Object.hasOwn(version.body, 'updateAvailable'));
 
   socket.close();

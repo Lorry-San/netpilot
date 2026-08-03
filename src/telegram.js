@@ -5,10 +5,12 @@ const api = globalThis.netpilotServerApi;
 const db = api?.db;
 const PAGE_SIZE = 4;
 const activeTests = new Map();
+const activeTraces = new Map();
 const bindFailures = new Map();
 let bot = null;
 let stopping = false;
 let completionHookRegistered = false;
+let traceCompletionHookRegistered = false;
 let botGeneration = 0;
 
 function token() {
@@ -99,11 +101,14 @@ function publicGroupUser(chat) {
                  FROM users WHERE id = ? AND disabled = 0`, group.owner_user_id);
 }
 
-function accessibleAgents(user) {
+function accessibleAgents(user, capability = '') {
   if (!user) return [];
-  if (user.role === 'admin') return db.all("SELECT * FROM agents WHERE deleted_at IS NULL AND status = 'online' ORDER BY name");
-  return db.all(`SELECT a.* FROM agents a JOIN user_agent_permissions p ON p.agent_id = a.id
+  const rows = user.role === 'admin' ? db.all("SELECT * FROM agents WHERE deleted_at IS NULL AND status = 'online' ORDER BY name") : db.all(`SELECT a.* FROM agents a JOIN user_agent_permissions p ON p.agent_id = a.id
                  WHERE p.user_id = ? AND a.deleted_at IS NULL AND a.status = 'online' ORDER BY a.name`, user.id);
+  if (!capability) return rows;
+  return rows.filter((agent) => {
+    try { return JSON.parse(agent.capabilities || '[]').includes(capability); } catch { return false; }
+  });
 }
 
 function makeId(prefix = 'tg') {
@@ -254,7 +259,7 @@ function resultText(view) {
 }
 
 async function sendHelp(chatId, replyToMessageId) {
-  await safeCall('sendMessage', { chat_id: chatId, text: '/help 查看命令帮助\n/status 查看授权与 Bot 状态\n/bind <网页生成的6位验证码>\n/agents 查看可用 Agent\n/iperf 交互设置 Agent、方向和目标\n/iperf <IP> [端口] [线程] [时长] [-R] 快捷测速\n\n直接输入 /iperf 时，先选择 Agent 和上/下行，再在 Bot 私聊输入 IP:端口。/iperf IP 默认上行；显式 -R 为下行。快捷模式默认端口 5201、线程 1、时长 10 秒。\n\n在群组中首次使用会自动登记。私有模式仅响应已绑定用户；管理员可在网页将群组设为公共模式。', parse_mode: 'HTML', ...replyTo(replyToMessageId) });
+  await safeCall('sendMessage', { chat_id: chatId, text: '/help 查看命令帮助\n/status 查看授权与 Bot 状态\n/bind <网页生成的6位验证码>\n/agents 查看可用 Agent\n/iperf 交互设置 Agent、方向和目标\n/iperf <IP> [端口] [线程] [时长] [-R] 快捷测速\n/nexttrace [参数] <IP/域名> 路由追踪\n\nNextTrace 支持 -4/-6、-T/-U、-p、-q、-m、--timeout、--parallel-requests、--psize、-n、-e；输入命令后选择一个 Agent 即开始，不生成图片。\n\n直接输入 /iperf 时，先选择 Agent 和上/下行，再在 Bot 私聊输入 IP:端口。/iperf IP 默认上行；显式 -R 为下行。快捷模式默认端口 5201、线程 1、时长 10 秒。\n\n在群组中首次使用会自动登记。私有模式仅响应已绑定用户；管理员可在网页将群组设为公共模式。', parse_mode: 'HTML', ...replyTo(replyToMessageId) });
 }
 
 async function sendStatus(chatId, user, chat, replyToMessageId) {
@@ -284,6 +289,92 @@ function parseIperfArgs(args = []) {
   const duration = positional[3] === undefined ? 10 : Number(positional[3]);
   if (!Number.isInteger(port) || port < 1 || port > 65535 || !Number.isInteger(parallel) || parallel < 1 || parallel > 32 || !Number.isInteger(duration) || duration < 1 || duration > 3600) return null;
   return { target, port, parallel, duration, reverse, reverseSpecified };
+}
+
+function parseNextTraceArgs(args = []) {
+  const tokens = args.map((value) => String(value).trim()).filter(Boolean);
+  const params = { target: '', addressFamily: 'auto', protocol: 'icmp', port: null, queries: 3, maxHops: 30, timeoutMs: 1000, parallelRequests: 18, packetSize: 0, reverseDns: true, mpls: true, mapTrace: false };
+  const valueFlags = new Map([
+    ['-p', 'port'], ['--port', 'port'], ['-q', 'queries'], ['--queries', 'queries'], ['-m', 'maxHops'], ['--max-hops', 'maxHops'],
+    ['--timeout', 'timeoutMs'], ['--parallel-requests', 'parallelRequests'], ['--psize', 'packetSize']
+  ]);
+  for (let index = 0; index < tokens.length; index += 1) {
+    let token = tokens[index];
+    let inlineValue = null;
+    if (token.startsWith('--') && token.includes('=')) [token, inlineValue] = [token.slice(0, token.indexOf('=')), token.slice(token.indexOf('=') + 1)];
+    if (valueFlags.has(token)) {
+      const value = inlineValue ?? tokens[++index];
+      if (value === undefined || value === '' || !/^\d+$/.test(value)) return null;
+      params[valueFlags.get(token)] = Number(value);
+    } else if (token === '-4' || token === '--ipv4') params.addressFamily = 'ipv4';
+    else if (token === '-6' || token === '--ipv6') params.addressFamily = 'ipv6';
+    else if (token === '-T' || token === '--tcp') params.protocol = 'tcp';
+    else if (token === '-U' || token === '--udp') params.protocol = 'udp';
+    else if (token === '-n' || token === '--no-rdns') params.reverseDns = false;
+    else if (token === '-a' || token === '--always-rdns') params.reverseDns = true;
+    else if (token === '-e' || token === '--disable-mpls') params.mpls = false;
+    else if (token === '-C' || token === '--no-color' || token === '-M' || token === '--map') { /* NetPilot already disables color and external maps by default. */ }
+    else if (token.startsWith('-')) return null;
+    else if (params.target) return null;
+    else params.target = token.replace(/^\[|\]$/g, '');
+  }
+  if (!params.target || params.target.length > 253 || /\s/.test(params.target)) return null;
+  if (![1, 3, 5, 10].includes(params.queries) || !Number.isInteger(params.maxHops) || params.maxHops < 1 || params.maxHops > 64
+      || !Number.isInteger(params.timeoutMs) || params.timeoutMs < 100 || params.timeoutMs > 10000
+      || !Number.isInteger(params.parallelRequests) || params.parallelRequests < 1 || params.parallelRequests > 64
+      || !Number.isInteger(params.packetSize) || params.packetSize < 0 || params.packetSize > 65535) return null;
+  if (params.protocol === 'tcp') params.port = params.port ?? 80;
+  else if (params.protocol === 'udp') params.port = params.port ?? 33494;
+  else params.port = null;
+  if (params.port !== null && (!Number.isInteger(params.port) || params.port < 1 || params.port > 65535)) return null;
+  return params;
+}
+
+function traceSelectionKeyboard(trace) {
+  const pages = Math.max(1, Math.ceil(trace.agents.length / PAGE_SIZE));
+  const start = trace.page * PAGE_SIZE;
+  const rows = trace.agents.slice(start, start + PAGE_SIZE).map((agent) => [
+    { text: `▶ ${agent.name}`, callback_data: `nt:${trace.id}:run:${agent.id}:${trace.telegramId}` }
+  ]);
+  const nav = [];
+  if (trace.page > 0) nav.push({ text: '⬅ 上一页', callback_data: `nt:${trace.id}:page:${trace.page - 1}:${trace.telegramId}` });
+  nav.push({ text: `${trace.page + 1}/${pages}`, callback_data: `nt:${trace.id}:noop:${trace.telegramId}` });
+  if (trace.page + 1 < pages) nav.push({ text: '下一页 ➡', callback_data: `nt:${trace.id}:page:${trace.page + 1}:${trace.telegramId}` });
+  rows.push(nav);
+  rows.push([{ text: '取消', callback_data: `nt:${trace.id}:cancel:${trace.telegramId}` }]);
+  return { inline_keyboard: rows };
+}
+
+function traceProgressKeyboard(trace) {
+  return { inline_keyboard: [[{ text: '中止追踪', callback_data: `nt:${trace.id}:stop:${trace.telegramId}` }]] };
+}
+
+function traceCommandSummary(params) {
+  return `${params.protocol.toUpperCase()}${params.port ? `:${params.port}` : ''} · ${params.addressFamily === 'auto' ? '自动地址族' : params.addressFamily.toUpperCase()} · ${params.queries} 次/跳 · ${params.maxHops} 跳 · ${params.packetSize ? `${params.packetSize} 字节` : '默认包大小'}`;
+}
+
+async function startTraceFromTelegram(chat, telegramId, user, args, replyToMessageId) {
+  const params = parseNextTraceArgs(args);
+  if (!params) {
+    await safeCall('sendMessage', { chat_id: chat.id, text: '格式：/nexttrace [参数] 目标\n支持：-4、-6、-T、-U、-p、-q、-m、--timeout、--parallel-requests、--psize、-n、-e\n示例：/nexttrace -T -p 443 -q 3 --psize 64 example.com', ...replyTo(replyToMessageId) });
+    return;
+  }
+  const agents = accessibleAgents(user, 'nexttrace');
+  if (!agents.length) {
+    await safeCall('sendMessage', { chat_id: chat.id, text: '没有支持 NextTrace 的在线 Agent，请先更新 Agent。', ...replyTo(replyToMessageId) });
+    return;
+  }
+  const id = makeId('nt');
+  const trace = { id, chatId: chat.id, telegramId, user, publicChatId: user.publicChatId || null, replyToMessageId, params, agents, page: 0, state: 'selecting', createdAt: Date.now() };
+  activeTraces.set(id, trace);
+  const sent = await safeCall('sendMessage', {
+    chat_id: chat.id,
+    text: `请选择执行 Agent，点击后立即开始追踪。\n目标：${params.target}\n参数：${traceCommandSummary(params)}`,
+    reply_markup: traceSelectionKeyboard(trace),
+    ...replyTo(replyToMessageId)
+  });
+  trace.messageId = sent?.message_id;
+  if (!trace.messageId) activeTraces.delete(id);
 }
 
 function parseTargetInput(value) {
@@ -509,8 +600,103 @@ async function completeTelegramTask(task, view) {
   await startNextAgent(test);
 }
 
+async function renderTraceProgress(trace, force = false) {
+  if (trace.state !== 'running' || !trace.currentTaskId) return;
+  const outputCount = Number(db.get('SELECT COUNT(*) AS count FROM trace_output WHERE trace_id = ?', trace.currentTaskId)?.count || 0);
+  const hopCount = Number(db.get('SELECT COUNT(*) AS count FROM trace_hops WHERE trace_id = ?', trace.currentTaskId)?.count || 0);
+  const text = `NextTrace 正在运行\nAgent：${trace.agent.name}\n目标：${trace.params.target}\n参数：${traceCommandSummary(trace.params)}\n已收到：${hopCount} 跳，${outputCount} 行输出\n已用时间：${formatDuration(elapsedMs(trace.startedAt))}`;
+  if (!force && text === trace.lastProgressText) return;
+  trace.lastProgressText = text;
+  await safeCall('editMessageText', { chat_id: trace.chatId, message_id: trace.messageId, text, reply_markup: traceProgressKeyboard(trace) });
+}
+
+function traceResultText(view) {
+  const raw = view.output.map((line) => line.line).join('\n');
+  const tail = raw.length > 3000 ? `…${raw.slice(-3000)}` : raw;
+  const status = view.status === 'completed' ? '完成' : view.status === 'cancelled' ? '已取消' : '失败';
+  const lastHop = view.hops.at(-1);
+  const response = lastHop ? `${lastHop.ttl} 跳，末跳 ${lastHop.address || '*'}` : '未收到有效跳点';
+  const error = view.result?.error ? `\n原因：${esc(view.result.error)}` : '';
+  return `路由追踪${status}\nAgent：${esc(view.agentName)}\n目标：${esc(view.target)}\n协议：${esc(traceProtocolText(view))}\n地址族：${esc(view.addressFamily)}\n包大小：${view.packetSize || '协议默认'}${view.packetSize ? ' 字节' : ''}\n结果：${esc(response)}${error}\n测试耗时：${formatDuration(elapsedMs(view.createdAt, view.finishedAt))}\n完成时间：${formatTimestamp(view.finishedAt)}\n\n<blockquote expandable>${esc(tail || '无原始输出')}</blockquote>`;
+}
+
+function traceProtocolText(view) {
+  return `${String(view.protocol || 'icmp').toUpperCase()}${view.port ? `:${view.port}` : ''}`;
+}
+
+async function completeTelegramTrace(task, view) {
+  const trace = [...activeTraces.values()].find((item) => item.currentTaskId === task.id);
+  if (!trace) return;
+  trace.state = 'finished';
+  clearInterval(trace.timer);
+  await safeCall('editMessageText', {
+    chat_id: trace.chatId,
+    message_id: trace.messageId,
+    text: `NextTrace ${view.status === 'completed' ? '已完成' : view.status === 'cancelled' ? '已取消' : '失败'}\nAgent：${view.agentName}\n目标：${view.target}\n耗时：${formatDuration(elapsedMs(view.createdAt, view.finishedAt))}`
+  });
+  await safeCall('sendMessage', { chat_id: trace.chatId, text: traceResultText(view), parse_mode: 'HTML', ...replyTo(trace.replyToMessageId) });
+  const raw = view.output.map((line) => line.line).join('\n');
+  if (raw.length > 3000) {
+    const timestamp = new Date(view.finishedAt || Date.now()).toISOString().replaceAll(':', '-').replace(/\.\d{3}Z$/, 'Z');
+    try {
+      await upload('sendDocument', { chat_id: trace.chatId, caption: `NextTrace 完整原始输出 · ${view.agentName}`, ...replyTo(trace.replyToMessageId) }, 'document', `nexttrace-${timestamp}.txt`, raw, 'text/plain; charset=utf-8');
+    } catch (error) {
+      console.error('[netpilot] telegram trace output:', error.message);
+    }
+  }
+  activeTraces.delete(trace.id);
+}
+
+async function traceCallbackQuery(query, data) {
+  const trace = activeTraces.get(data[1]);
+  const expected = Number(data.at(-1));
+  const currentUser = boundUser(query.from?.id);
+  const publicGroup = trace?.publicChatId ? groupFor(trace.publicChatId) : null;
+  const publicAuthorized = publicGroup?.mode === 'all_members' && publicGroup.owner_user_id === trace?.user.id;
+  if (!trace || expected !== Number(query.from?.id) || trace.telegramId !== expected || (currentUser?.id !== trace.user.id && !publicAuthorized)) {
+    await safeCall('answerCallbackQuery', { callback_query_id: query.id, text: '无权操作此任务', show_alert: true });
+    return;
+  }
+  const action = data[2];
+  if (action === 'page' && trace.state === 'selecting') {
+    trace.page = Math.max(0, Number(data[3]) || 0);
+    await safeCall('answerCallbackQuery', { callback_query_id: query.id });
+    await safeCall('editMessageReplyMarkup', { chat_id: trace.chatId, message_id: trace.messageId, reply_markup: traceSelectionKeyboard(trace) });
+  } else if (action === 'noop' && trace.state === 'selecting') {
+    await safeCall('answerCallbackQuery', { callback_query_id: query.id });
+  } else if (action === 'run' && trace.state === 'selecting') {
+    const agent = trace.agents.find((item) => item.id === data[3]);
+    if (!agent) return safeCall('answerCallbackQuery', { callback_query_id: query.id, text: 'Agent 不可用', show_alert: true });
+    try {
+      const task = api.createTrace(trace.user, { ...trace.params, agentId: agent.id });
+      trace.agent = agent;
+      trace.currentTaskId = task.id;
+      trace.startedAt = Date.now();
+      trace.state = 'running';
+      api.audit(trace.user.id, 'trace.create.telegram', task.id, { agentId: agent.id, target: trace.params.target, chatId: trace.chatId });
+      await safeCall('answerCallbackQuery', { callback_query_id: query.id, text: '路由追踪已开始' });
+      await renderTraceProgress(trace, true);
+      const timer = setInterval(() => renderTraceProgress(trace), 2000);
+      timer.unref?.();
+      trace.timer = timer;
+    } catch (error) {
+      await safeCall('answerCallbackQuery', { callback_query_id: query.id, text: error.message, show_alert: true });
+    }
+  } else if (action === 'stop' && trace.state === 'running') {
+    await safeCall('answerCallbackQuery', { callback_query_id: query.id, text: '正在中止路由追踪' });
+    try { api.cancelTrace(trace.user, trace.currentTaskId); } catch (error) { await safeCall('sendMessage', { chat_id: trace.chatId, text: `中止失败：${error.message}`, ...replyTo(trace.replyToMessageId) }); }
+  } else if (action === 'cancel' && trace.state === 'selecting') {
+    activeTraces.delete(trace.id);
+    await safeCall('answerCallbackQuery', { callback_query_id: query.id, text: '已取消' });
+    await safeCall('editMessageText', { chat_id: trace.chatId, message_id: trace.messageId, text: '路由追踪已取消。' });
+  } else {
+    await safeCall('answerCallbackQuery', { callback_query_id: query.id, text: trace.state === 'running' ? '路由追踪正在运行' : '当前操作不可用' });
+  }
+}
+
 async function callbackQuery(query) {
   const data = String(query.data || '').split(':');
+  if (data[0] === 'nt') return traceCallbackQuery(query, data);
   if (data[0] !== 'tg') return;
   const test = activeTests.get(data[1]);
   const expected = Number(data.at(-1));
@@ -674,7 +860,7 @@ async function handleMessage(message) {
     db.run('INSERT INTO telegram_users (telegram_id, user_id, telegram_username, chat_id, bound_at) VALUES (?, ?, ?, ?, ?)', from.id, row.user_id, from.username || '', chat.id, db.now());
     db.run('DELETE FROM telegram_bind_codes WHERE code = ?', code);
     bindFailures.delete(from.id);
-    await safeCall('sendMessage', { chat_id: chat.id, text: '绑定成功，现在可以使用 /agents 和 /iperf。', ...replyTo(message.message_id) });
+    await safeCall('sendMessage', { chat_id: chat.id, text: '绑定成功，现在可以使用 /agents、/iperf 和 /nexttrace。', ...replyTo(message.message_id) });
     return;
   }
   if (command === '/start' && parts[1]?.startsWith('iperf_') && chat.type === 'private') {
@@ -703,6 +889,7 @@ async function handleMessage(message) {
     return;
   }
   if (command === '/iperf') return startTestFromTelegram(chat, from.id, user, parts.slice(1), message.message_id);
+  if (command === '/nexttrace') return startTraceFromTelegram(chat, from.id, user, parts.slice(1), message.message_id);
 }
 
 async function handleChatMember(update) {
@@ -764,7 +951,8 @@ export async function startTelegramBot() {
       { command: 'status', description: '查看授权与 Bot 状态' },
       { command: 'bind', description: '绑定网页账户' },
       { command: 'agents', description: '查看可用 Agent' },
-      { command: 'iperf', description: '交互测速，或附带 IP 快捷上行' }
+      { command: 'iperf', description: '交互测速，或附带 IP 快捷上行' },
+      { command: 'nexttrace', description: '选择 Agent 执行路由追踪' }
     ] });
   }
   globalThis.netpilotTelegramReload = async () => {
@@ -779,6 +967,10 @@ export async function startTelegramBot() {
     api.onTaskComplete(completeTelegramTask);
     completionHookRegistered = true;
   }
+  if (!traceCompletionHookRegistered && typeof api.onTraceComplete === 'function') {
+    api.onTraceComplete(completeTelegramTrace);
+    traceCompletionHookRegistered = true;
+  }
 }
 
-export const telegramTest = { activeTests, beginSelectedTest, callbackQuery, chartSvg, completeTelegramTask, directionKeyboard, finishTest, handleChatMember, handleMessage, parseIperfArgs, parseTargetInput, privateTargetKeyboard, progressKeyboard, selectionKeyboard };
+export const telegramTest = { activeTests, activeTraces, beginSelectedTest, callbackQuery, chartSvg, completeTelegramTask, completeTelegramTrace, directionKeyboard, finishTest, handleChatMember, handleMessage, parseIperfArgs, parseNextTraceArgs, parseTargetInput, privateTargetKeyboard, progressKeyboard, selectionKeyboard, traceSelectionKeyboard };

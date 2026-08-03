@@ -6,6 +6,7 @@ ACCEL="${NETPILOT_GITHUB_ACCEL:-}"
 MODE="${NETPILOT_UPDATE_MODE:-auto}"
 BINARY="${NETPILOT_AGENT_BINARY:-/usr/local/bin/netpilot-agent}"
 CONTAINER="${NETPILOT_AGENT_CONTAINER:-netpilot-agent}"
+NEXTTRACE_VERSION="v1.7.1"
 umask 077
 
 if [ -n "$ACCEL" ] && [ "${ACCEL%/}" = "$ACCEL" ]; then ACCEL="${ACCEL}/"; fi
@@ -100,6 +101,25 @@ update_native() {
     exit 1
   fi
 
+  case "$ARCH" in
+    amd64) nexttrace_checksum="1f4c559cbdf6f667a1a9e050567c9cf1fc11741e8cc1e50f5fdcaf2dbb247232" ;;
+    arm64) nexttrace_checksum="9c2f1b79e7d0e37f59ebe685aec1d5c41fb8f3407f54e17b34656712eaa66fd9" ;;
+  esac
+  echo ">>> downloading NextTrace ${NEXTTRACE_VERSION}"
+  download "${ACCEL}https://github.com/nxtrace/NTrace-core/releases/download/${NEXTTRACE_VERSION}/nexttrace_linux_${ARCH}" "$TEMP_DIR/nexttrace"
+  download "${ACCEL}https://github.com/nxtrace/NTrace-core/raw/${NEXTTRACE_VERSION}/LICENSE" "$TEMP_DIR/NEXTTRACE-LICENSE"
+  nexttrace_actual="$(sha256sum "$TEMP_DIR/nexttrace" | awk '{ print $1 }')"
+  if [ "$nexttrace_actual" != "$nexttrace_checksum" ]; then
+    echo "NextTrace checksum verification failed." >&2
+    exit 1
+  fi
+  nexttrace_license_actual="$(sha256sum "$TEMP_DIR/NEXTTRACE-LICENSE" | awk '{ print $1 }')"
+  if [ "$nexttrace_license_actual" != "3972dc9744f6499f0f9b2dbf76696f2ae7ad8af9b23dde66d6af86c9dfb36986" ]; then
+    echo "NextTrace license checksum verification failed." >&2
+    exit 1
+  fi
+  chmod 0755 "$TEMP_DIR/nexttrace"
+
   echo ">>> downloading latest ${ASSET}"
   download "${DOWNLOAD_BASE}/${ASSET}" "$NEW_BINARY"
   download "${DOWNLOAD_BASE}/SHA256SUMS" "$TEMP_DIR/SHA256SUMS"
@@ -113,6 +133,9 @@ update_native() {
   old_version="$($BINARY --version 2>/dev/null || echo unknown)"
   new_version="$($NEW_BINARY --version)"
   if [ "$old_version" = "$new_version" ]; then
+    mv "$TEMP_DIR/nexttrace" /usr/local/bin/nexttrace
+    mkdir -p /usr/share/licenses/nexttrace
+    mv "$TEMP_DIR/NEXTTRACE-LICENSE" /usr/share/licenses/nexttrace/LICENSE
     echo ">>> NetPilot Agent is already up to date (${new_version})"
     exit 0
   fi
@@ -120,6 +143,9 @@ update_native() {
 
   ROLLBACK="native"
   service_stop
+  mv "$TEMP_DIR/nexttrace" /usr/local/bin/nexttrace
+  mkdir -p /usr/share/licenses/nexttrace
+  mv "$TEMP_DIR/NEXTTRACE-LICENSE" /usr/share/licenses/nexttrace/LICENSE
   mv "$BINARY" "$BACKUP_BINARY"
   mv "$NEW_BINARY" "$BINARY"
   service_start
@@ -173,7 +199,7 @@ update_docker() {
   ROLLBACK="docker"
   docker rename "$CONTAINER" "$BACKUP_CONTAINER"
   docker stop "$BACKUP_CONTAINER" >/dev/null
-  docker run -d --name "$CONTAINER" --restart "$restart_policy" --env-file "$TEMP_DIR/agent.env" "$image" >/dev/null
+  docker run -d --name "$CONTAINER" --restart "$restart_policy" --cap-add NET_RAW --env-file "$TEMP_DIR/agent.env" "$image" >/dev/null
   sleep 3
   if [ "$(docker inspect --format '{{.State.Running}}' "$CONTAINER")" != "true" ]; then
     echo "Updated Agent container did not become healthy." >&2

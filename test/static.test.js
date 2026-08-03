@@ -72,7 +72,10 @@ test('static assets and installer script are served', async (t) => {
   assert.match(indexHtml, /id="setting-github-accel-enabled"/);
   assert.match(indexHtml, /id="setting-telegram-token"/);
   assert.match(indexHtml, /id="setting-telegram-status"/);
-  assert.match(indexHtml, /\/app\.js\?v=0\.1\.17/);
+  assert.match(indexHtml, /id="view-traces"/);
+  assert.match(indexHtml, /id="trace-packet-size"/);
+  assert.match(indexHtml, /id="setting-nexttrace-provider"/);
+  assert.match(indexHtml, /\/app\.js\?v=0\.1\.18/);
   assert.match(indexHtml, /id="generate-telegram-code"/);
   assert.match(indexHtml, /id="telegram-group-choices"/);
   assert.match(indexHtml, /id="telegram-groups-all-members"/);
@@ -101,6 +104,8 @@ test('static assets and installer script are served', async (t) => {
   assert.match(appScript, /selectedAgentIds/);
   assert.match(appScript, /\/api\/telegram\/bind-code/);
   assert.match(appScript, /\/api\/telegram\/groups/);
+  assert.match(appScript, /\/api\/traces/);
+  assert.match(appScript, /trace\.hop/);
 
   const installer = await fetch(`${base}/install-agent.sh`);
   assert.equal(installer.status, 200);
@@ -110,6 +115,8 @@ test('static assets and installer script are served', async (t) => {
   assert.match(script, /systemctl/);
   assert.match(script, /openrc-run/);
   assert.match(script, /NETPILOT_GITHUB_ACCEL/);
+  assert.match(script, /nexttrace_linux_/);
+  assert.match(script, /NEXTTRACE_VERSION="v1\.7\.1"/);
 
   const updater = await fetch(`${base}/update-agent.sh`);
   assert.equal(updater.status, 200);

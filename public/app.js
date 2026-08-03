@@ -1,4 +1,4 @@
-const state = { user: null, agents: [], users: [], tests: [], telegramGroups: [], telegram: null, activeTestId: null, pollTimer: null, settingsLoaded: false, liveSocket: null };
+const state = { user: null, agents: [], users: [], tests: [], traces: [], traceConfig: {}, telegramGroups: [], telegram: null, activeTestId: null, activeTraceId: null, pollTimer: null, settingsLoaded: false, liveSocket: null };
 const $ = (selector) => document.querySelector(selector);
 const $$ = (selector) => [...document.querySelectorAll(selector)];
 
@@ -93,6 +93,13 @@ function appendOutput(line) {
   output.scrollTop = output.scrollHeight;
 }
 
+function appendTraceOutput(line) {
+  const output = $('#trace-raw-output');
+  if (output.dataset.streaming !== '1') { output.textContent = ''; output.dataset.streaming = '1'; }
+  output.append(document.createTextNode(`${line}\n`));
+  output.scrollTop = output.scrollHeight;
+}
+
 function handleLiveMessage(message) {
   if (message.type === 'agent.update') {
     renderAgentUpdateStatus(message.payload || {});
@@ -101,6 +108,27 @@ function handleLiveMessage(message) {
   }
   const taskId = message.taskId;
   if (!taskId) return;
+  const trace = state.traces.find((item) => item.id === taskId);
+  if (trace && !state.activeTraceId) state.activeTraceId = taskId;
+  if (message.type === 'trace.stdout' || message.type === 'trace.stderr') {
+    const line = String(message.payload?.line ?? '');
+    if (trace) trace.output.push({ stream: message.type === 'trace.stderr' ? 'stderr' : 'stdout', line });
+    if (state.activeTraceId === taskId) appendTraceOutput(line);
+    return;
+  }
+  if (message.type === 'trace.hop') {
+    if (trace) {
+      const index = trace.hops.findIndex((hop) => hop.ttl === message.payload?.ttl);
+      if (index >= 0) trace.hops[index] = message.payload; else trace.hops.push(message.payload);
+      trace.hops.sort((a, b) => a.ttl - b.ttl);
+      if (state.activeTraceId === taskId) renderTraceHops(trace.hops);
+    }
+    return;
+  }
+  if (message.type === 'trace.done' || message.type === 'trace.error') {
+    Promise.all([loadAgents(), loadTraces({ preserveActiveOutput: true })]).catch(() => {});
+    return;
+  }
   const test = state.tests.find((item) => item.id === taskId);
   if (test && !state.activeTestId) state.activeTestId = taskId;
   if (message.type === 'task.stdout' || message.type === 'task.stderr') {
@@ -173,7 +201,7 @@ async function showApp(user) {
   setView('tests');
   try {
     await loadAgents();
-    await Promise.all([loadTests(), loadTelegramPage(), user.role === 'admin' ? loadUsers() : Promise.resolve()]);
+    await Promise.all([loadTests(), loadTraces(), loadTelegramPage(), user.role === 'admin' ? loadUsers() : Promise.resolve()]);
   } catch (error) {
     console.error(error);
     toast(`数据加载失败：${error.message}`);
@@ -183,7 +211,7 @@ async function showApp(user) {
   clearInterval(state.pollTimer);
   state.pollTimer = setInterval(async () => {
     if ($('#app-view').hidden) return;
-    try { await Promise.all([loadAgents(), loadTests({ preserveActiveOutput: true })]); } catch { /* a transient poll error is surfaced on the next action */ }
+    try { await Promise.all([loadAgents(), loadTests({ preserveActiveOutput: true }), loadTraces({ preserveActiveOutput: true })]); } catch { /* a transient poll error is surfaced on the next action */ }
   }, 4000);
 }
 
@@ -192,7 +220,7 @@ function setView(name) {
   if (name === 'settings' && state.user?.id !== 1) return;
   $$('.page').forEach((node) => { node.hidden = node.id !== `view-${name}`; });
   $('.sidebar nav').querySelectorAll('button').forEach((node) => node.classList.toggle('active', node.dataset.view === name));
-  $('#page-title').textContent = { tests: '网络性能测试', agents: 'Agent 管理', telegram: 'Telegram 机器人', users: '用户管理', settings: '系统设置' }[name];
+  $('#page-title').textContent = { tests: '网络性能测试', traces: 'NextTrace 路由追踪', agents: 'Agent 管理', telegram: 'Telegram 机器人', users: '用户管理', settings: '系统设置' }[name];
 }
 
 async function loadVersion(refresh = false) {
@@ -232,6 +260,8 @@ async function loadSettings() {
   $('#setting-github-accel-enabled').checked = result.settings.githubAccelEnabled;
   $('#setting-github-accel-domain').value = result.settings.githubAccelDomain;
   $('#setting-telegram-token').value = result.settings.telegramBotToken;
+  $('#setting-nexttrace-provider').value = result.settings.nexttraceDataProvider;
+  $('#setting-nexttrace-map').checked = result.settings.nexttraceMapEnabled;
   $('#setting-telegram-status').textContent = result.settings.telegramBotEnabled
     ? `当前已连接 @${result.settings.telegramBotUsername || '未知 Bot'}`
     : '当前未启用';
@@ -262,6 +292,28 @@ function renderAgentSelect() {
     if (available) select.value = available.value;
   }
   updateSelectedAgent();
+  const traceSelect = $('#trace-agent');
+  const traceSelected = traceSelect.value;
+  clear(traceSelect);
+  for (const agent of state.agents) {
+    const option = document.createElement('option');
+    option.value = agent.id;
+    option.textContent = `${agent.name} · ${agent.supportsNextTrace ? statusLabel(agent.status) : '不支持路由追踪'}`;
+    option.disabled = agent.status !== 'online' || !agent.supportsNextTrace;
+    traceSelect.appendChild(option);
+  }
+  if (![...traceSelect.options].length) traceSelect.appendChild(new Option('暂无可用 Agent', ''));
+  if ([...traceSelect.options].some((option) => option.value === traceSelected && !option.disabled)) traceSelect.value = traceSelected;
+  else {
+    const available = [...traceSelect.options].find((option) => !option.disabled && option.value);
+    if (available) traceSelect.value = available.value;
+  }
+  updateTraceAgent();
+}
+
+function updateTraceAgent() {
+  const agent = state.agents.find((item) => item.id === $('#trace-agent').value);
+  $('#start-trace').disabled = !agent || agent.status !== 'online' || !agent.supportsNextTrace;
 }
 
 function updateSelectedAgent() {
@@ -434,6 +486,78 @@ async function loadTests(options = {}) {
   const result = await api('/api/tests');
   state.tests = result.tests;
   renderTests(options);
+}
+
+function traceProtocolLabel(trace) {
+  return `${String(trace.protocol || 'icmp').toUpperCase()}${trace.port ? `:${trace.port}` : ''}`;
+}
+
+function renderTraceHops(hops = []) {
+  const body = $('#trace-hops-body');
+  clear(body);
+  for (const hop of hops) {
+    const tr = document.createElement('tr');
+    const rtts = Array.isArray(hop.rtts) ? hop.rtts : [];
+    const node = document.createElement('div');
+    const address = document.createElement('strong');
+    address.textContent = hop.address || '*';
+    node.appendChild(address);
+    if (hop.hostname) { const hostname = document.createElement('small'); hostname.textContent = hop.hostname; node.appendChild(hostname); }
+    const network = document.createElement('div');
+    const details = document.createElement('strong');
+    details.textContent = hop.asn || hop.details || (hop.address === '*' ? '本跳未响应' : '');
+    network.appendChild(details);
+    const rtt = document.createElement('div');
+    rtt.className = 'trace-rtts';
+    for (const value of rtts) { const span = document.createElement('span'); span.textContent = value === null ? '*' : `${Number(value).toFixed(2)} ms`; rtt.appendChild(span); }
+    tr.append(cell(hop.ttl), cell(node), cell(network), cell(rtt), cell(`${Number(hop.responses || 0)}/${rtts.length || 0}`));
+    body.appendChild(tr);
+  }
+  if (!hops.length) body.appendChild(Object.assign(document.createElement('tr'), { innerHTML: '<td colspan="5">等待 Agent 返回逐跳结果。</td>' }));
+}
+
+function renderTraces({ preserveActiveOutput = false } = {}) {
+  const body = $('#traces-body');
+  clear(body);
+  for (const trace of state.traces) {
+    const tr = document.createElement('tr');
+    tr.append(cell(trace.target), cell(trace.agentName || trace.agentId), cell(traceProtocolLabel(trace)), cell(trace.hops?.length || '--'), cell(statusLabel(trace.status)), cell(formatDate(trace.createdAt)));
+    tr.addEventListener('click', () => {
+      state.activeTraceId = trace.id;
+      renderTraceDetail(trace, false);
+    });
+    body.appendChild(tr);
+  }
+  const active = state.traces.find((trace) => trace.id === state.activeTraceId) || state.traces.find((trace) => ['running', 'queued'].includes(trace.status));
+  if (active) {
+    state.activeTraceId = active.id;
+    renderTraceDetail(active, preserveActiveOutput && active.status === 'running');
+  } else {
+    $('#cancel-trace').disabled = true;
+  }
+}
+
+function renderTraceDetail(trace, preserveOutput = false) {
+  $('#trace-state').textContent = statusLabel(trace.status);
+  $('#trace-result-title').textContent = `${trace.target} · ${traceProtocolLabel(trace)}`;
+  $('#trace-result-meta').textContent = `${trace.agentName || trace.agentId} · ${trace.maxHops} 跳上限 · ${trace.queries} 次/跳 · ${trace.packetSize ? `${trace.packetSize} 字节` : '默认包大小'}${trace.result?.error ? ` · ${trace.result.error}` : ''}`;
+  $('#cancel-trace').disabled = !['running', 'queued'].includes(trace.status);
+  if (!preserveOutput) {
+    const output = trace.output.map((line) => line.line).join('\n');
+    $('#trace-raw-output').textContent = output ? `${output}\n` : '等待 Agent 输出。';
+    $('#trace-raw-output').dataset.streaming = output ? '1' : '0';
+    $('#trace-raw-output').scrollTop = $('#trace-raw-output').scrollHeight;
+    renderTraceHops(trace.hops);
+  }
+}
+
+async function loadTraces(options = {}) {
+  const result = await api('/api/traces');
+  state.traces = result.traces;
+  state.traceConfig = result.config || {};
+  $('#trace-provider').textContent = state.traceConfig.dataProvider || '已关闭';
+  $('#trace-map').disabled = !state.traceConfig.mapEnabled;
+  renderTraces(options);
 }
 
 function drawChart(metrics) {
@@ -734,7 +858,9 @@ $('#settings-form').addEventListener('submit', async (event) => {
         scriptBase: $('#setting-script-base').value,
         githubAccelEnabled: $('#setting-github-accel-enabled').checked,
         githubAccelDomain: $('#setting-github-accel-domain').value,
-        telegramBotToken: $('#setting-telegram-token').value
+        telegramBotToken: $('#setting-telegram-token').value,
+        nexttraceDataProvider: $('#setting-nexttrace-provider').value,
+        nexttraceMapEnabled: $('#setting-nexttrace-map').checked
       })
     });
     await loadSettings();
@@ -762,7 +888,13 @@ $('#telegram-groups-remove').addEventListener('click', () => {
 });
 
 $('#test-agent').addEventListener('change', updateSelectedAgent);
+$('#trace-agent').addEventListener('change', updateTraceAgent);
 $$('input[name="protocol"]').forEach((input) => input.addEventListener('change', () => { $('#bandwidth-row').hidden = input.value !== 'udp' || !input.checked; }));
+$$('input[name="trace-protocol"]').forEach((input) => input.addEventListener('change', () => {
+  if (!input.checked) return;
+  $('#trace-port').disabled = input.value === 'icmp';
+  $('#trace-port').value = input.value === 'udp' ? '33494' : '80';
+}));
 $('#test-form').addEventListener('submit', async (event) => {
   event.preventDefault();
   const data = {
@@ -790,6 +922,48 @@ $('#cancel-test').addEventListener('click', async () => {
   catch (error) { toast(error.message); }
 });
 $('#refresh-tests').addEventListener('click', () => loadTests().catch((error) => toast(error.message)));
+
+function selectTraceTab(raw) {
+  $('#trace-tab-hops').classList.toggle('active', !raw);
+  $('#trace-tab-raw').classList.toggle('active', raw);
+  $('#trace-hops-view').hidden = raw;
+  $('#trace-raw-output').hidden = !raw;
+}
+$('#trace-tab-hops').addEventListener('click', () => selectTraceTab(false));
+$('#trace-tab-raw').addEventListener('click', () => selectTraceTab(true));
+$('#trace-form').addEventListener('submit', async (event) => {
+  event.preventDefault();
+  const protocol = $('input[name="trace-protocol"]:checked').value;
+  const data = {
+    agentId: $('#trace-agent').value,
+    target: $('#trace-target').value,
+    addressFamily: $('input[name="trace-family"]:checked').value,
+    protocol,
+    port: protocol === 'icmp' ? null : Number($('#trace-port').value),
+    queries: Number($('#trace-queries').value),
+    maxHops: Number($('#trace-max-hops').value),
+    timeoutMs: Number($('#trace-timeout').value),
+    parallelRequests: Number($('#trace-parallel').value),
+    packetSize: Number($('#trace-packet-size').value),
+    reverseDns: $('#trace-rdns').checked,
+    mpls: $('#trace-mpls').checked,
+    mapTrace: $('#trace-map').checked
+  };
+  try {
+    const result = await api('/api/traces', { method: 'POST', body: JSON.stringify(data) });
+    state.activeTraceId = result.trace.id;
+    $('#trace-raw-output').textContent = '任务已下发，等待 Agent 输出。';
+    $('#trace-raw-output').dataset.streaming = '0';
+    renderTraceHops([]);
+    await Promise.all([loadAgents(), loadTraces()]);
+  } catch (error) { toast(error.message); }
+});
+$('#cancel-trace').addEventListener('click', async () => {
+  if (!state.activeTraceId) return;
+  try { await api(`/api/traces/${state.activeTraceId}/cancel`, { method: 'POST', body: '{}' }); await Promise.all([loadAgents(), loadTraces()]); }
+  catch (error) { toast(error.message); }
+});
+$('#refresh-traces').addEventListener('click', () => loadTraces().catch((error) => toast(error.message)));
 
 $('#add-agent').addEventListener('click', () => $('#agent-dialog').showModal());
 $('#agent-form').addEventListener('submit', async (event) => {

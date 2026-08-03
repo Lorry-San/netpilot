@@ -1,6 +1,7 @@
 import { createServer } from 'node:http';
 import { randomInt } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
+import { isIP } from 'node:net';
 import { extname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { WebSocketServer, WebSocket } from 'ws';
@@ -18,6 +19,8 @@ const agentConnections = new Map();
 const agentUpdateJobs = new Map();
 const agentUpdateByAgent = new Map();
 const uiClients = new Set();
+const traceParserState = new Map();
+const nextTraceProviders = new Set(['disable-geoip', 'IPInfoLocal', 'IP.SB', 'IPInfo', 'IPInsight', 'IPAPI.com', 'ip-api.com', 'chunzhen', 'ipdb.one', 'LeoMoeAPI']);
 
 function broadcastTask(task, message) {
   const data = JSON.stringify(message);
@@ -108,6 +111,8 @@ function canUseAgent(user, agentId) {
 }
 
 function agentView(agent) {
+  let capabilities = ['iperf3'];
+  try { capabilities = JSON.parse(agent.capabilities || '["iperf3"]'); } catch { /* keep legacy default */ }
   return {
     id: agent.id,
     name: agent.name,
@@ -115,6 +120,9 @@ function agentView(agent) {
     os: agent.os,
     arch: agent.arch,
     version: agent.version,
+    capabilities,
+    supportsNextTrace: capabilities.includes('nexttrace'),
+    nexttraceVersion: agent.nexttrace_version || '',
     autoUpdateSupported: supportsAgentAutoUpdate(agent.version),
     publicIp: agent.public_ip,
     ipLocation: agent.ip_location,
@@ -272,7 +280,7 @@ function installCommands(agent, token, baseUrl = publicBaseUrl) {
   ].filter(Boolean).join(' ');
   return {
     token,
-    docker: `docker run -d --name netpilot-agent --restart unless-stopped \\\n  -e NETPILOT_SERVER=${shellQuote(wsUrl)} \\\n  -e NETPILOT_TOKEN=${shellQuote(token)} \\\n  -e NETPILOT_AGENT_ID=${shellQuote(agent.id)} \\\n  -e NETPILOT_AGENT_NAME=${shellQuote(agent.name)} ${shellQuote(image)}`,
+    docker: `docker run -d --name netpilot-agent --restart unless-stopped --cap-add NET_RAW \\\n  -e NETPILOT_SERVER=${shellQuote(wsUrl)} \\\n  -e NETPILOT_TOKEN=${shellQuote(token)} \\\n  -e NETPILOT_AGENT_ID=${shellQuote(agent.id)} \\\n  -e NETPILOT_AGENT_NAME=${shellQuote(agent.name)} ${shellQuote(image)}`,
     script: `curl -fsSL ${shellQuote(script)} | env ${environment} sh`,
     binary: `${environment} ./netpilot-agent`
   };
@@ -457,6 +465,153 @@ function taskView(task) {
   };
 }
 
+function parseCapabilities(value) {
+  try {
+    const parsed = JSON.parse(value || '[]');
+    return Array.isArray(parsed) ? parsed.map(String) : [];
+  } catch {
+    return [];
+  }
+}
+
+function isPrivateTarget(value) {
+  const target = String(value || '').replace(/^\[|\]$/g, '').toLowerCase();
+  if (target === 'localhost' || target.endsWith('.localhost')) return true;
+  if (isIP(target) === 4) {
+    const [a, b] = target.split('.').map(Number);
+    return a === 0 || a === 10 || a === 127 || a >= 224 || (a === 100 && b >= 64 && b <= 127)
+      || (a === 169 && b === 254) || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168)
+      || (a === 198 && (b === 18 || b === 19));
+  }
+  if (isIP(target) === 6) {
+    return target === '::' || target === '::1' || target.startsWith('fc') || target.startsWith('fd')
+      || /^fe[89ab]/.test(target) || target.startsWith('ff') || target.startsWith('::ffff:');
+  }
+  return false;
+}
+
+function normalizeTraceParams(body = {}, user) {
+  const target = String(body.target || '').trim().replace(/^\[|\]$/g, '');
+  if (!target || target.length > 253 || /[\s/?#@]/.test(target) || (!isIP(target) && !/^(?=.{1,253}$)(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)*[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$/.test(target))) {
+    throw Object.assign(new Error('目标 IP 或域名无效'), { status: 400 });
+  }
+  if (user.role !== 'admin' && isPrivateTarget(target)) throw Object.assign(new Error('普通用户不能追踪私有、保留或本机地址'), { status: 403 });
+  const addressFamily = ['auto', 'ipv4', 'ipv6'].includes(body.addressFamily) ? body.addressFamily : 'auto';
+  const protocol = ['icmp', 'tcp', 'udp'].includes(body.protocol) ? body.protocol : 'icmp';
+  const portDefault = protocol === 'tcp' ? 80 : protocol === 'udp' ? 33494 : null;
+  const port = protocol === 'icmp' ? null : Number(body.port ?? portDefault);
+  const queries = Number(body.queries ?? 3);
+  const maxHops = Number(body.maxHops ?? 30);
+  const timeoutMs = Number(body.timeoutMs ?? 1000);
+  const parallelRequests = Number(body.parallelRequests ?? 18);
+  const packetSize = Number(body.packetSize ?? 0);
+  if ((port !== null && (!Number.isInteger(port) || port < 1 || port > 65535))
+      || ![1, 3, 5, 10].includes(queries) || !Number.isInteger(maxHops) || maxHops < 1 || maxHops > 64
+      || !Number.isInteger(timeoutMs) || timeoutMs < 100 || timeoutMs > 10000
+      || !Number.isInteger(parallelRequests) || parallelRequests < 1 || parallelRequests > 64
+      || !Number.isInteger(packetSize) || packetSize < 0 || packetSize > 65535) {
+    throw Object.assign(new Error('路由追踪参数无效'), { status: 400 });
+  }
+  const settings = getSettings();
+  const configuredProvider = nextTraceProviders.has(settings.nexttrace_data_provider) ? settings.nexttrace_data_provider : 'disable-geoip';
+  return {
+    target, addressFamily, protocol, port, queries, maxHops, timeoutMs, parallelRequests, packetSize,
+    reverseDns: body.reverseDns !== false,
+    mpls: body.mpls !== false,
+    mapTrace: settings.nexttrace_map_enabled === '1' && body.mapTrace === true,
+    dataProvider: configuredProvider,
+    allowPrivate: user.role === 'admin'
+  };
+}
+
+function traceView(trace) {
+  const agent = get('SELECT name, deleted_at FROM agents WHERE id = ?', trace.agent_id);
+  let result = {};
+  try { result = JSON.parse(trace.result_json || '{}'); } catch { /* keep empty result */ }
+  return {
+    id: trace.id,
+    agentId: trace.agent_id,
+    agentName: agent?.name || '',
+    agentDeleted: Boolean(agent?.deleted_at),
+    target: trace.target,
+    addressFamily: trace.address_family,
+    protocol: trace.protocol,
+    port: trace.port,
+    queries: trace.queries,
+    maxHops: trace.max_hops,
+    timeoutMs: trace.timeout_ms,
+    parallelRequests: trace.parallel_requests,
+    packetSize: trace.packet_size,
+    reverseDns: Boolean(trace.reverse_dns),
+    mpls: Boolean(trace.mpls),
+    mapTrace: Boolean(trace.map_trace),
+    dataProvider: trace.data_provider,
+    status: trace.status,
+    startedAt: trace.started_at,
+    finishedAt: trace.finished_at,
+    createdAt: trace.created_at,
+    result,
+    output: all('SELECT stream, line, created_at AS createdAt FROM trace_output WHERE trace_id = ? ORDER BY id ASC', trace.id),
+    hops: all('SELECT ttl, address, hostname, asn, details, rtts_json AS rttsJson, responses FROM trace_hops WHERE trace_id = ? ORDER BY ttl ASC', trace.id)
+      .map((hop) => ({ ...hop, rtts: JSON.parse(hop.rttsJson || '[]'), rttsJson: undefined }))
+  };
+}
+
+export function createTrace(user, body = {}) {
+  const agent = get('SELECT * FROM agents WHERE id = ? AND deleted_at IS NULL', String(body.agentId || ''));
+  if (!agent || !canUseAgent(user, agent.id)) throw Object.assign(new Error('无权使用该 Agent'), { status: 403 });
+  if (agent.status === 'offline') throw Object.assign(new Error('Agent 当前离线'), { status: 409 });
+  if (agent.status === 'busy') throw Object.assign(new Error('Agent 正在执行其他任务'), { status: 409 });
+  if (!parseCapabilities(agent.capabilities).includes('nexttrace')) throw Object.assign(new Error('该 Agent 不支持路由追踪，请先更新 Agent'), { status: 409 });
+  const params = normalizeTraceParams(body, user);
+  const id = `trace_${randomToken(12)}`;
+  const created = now();
+  run(`INSERT INTO trace_tasks (id, user_id, agent_id, target, address_family, protocol, port, queries, max_hops, timeout_ms,
+       parallel_requests, packet_size, reverse_dns, mpls, map_trace, data_provider, status, started_at, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'running', ?, ?)`,
+  id, user.id, agent.id, params.target, params.addressFamily, params.protocol, params.port, params.queries, params.maxHops,
+  params.timeoutMs, params.parallelRequests, params.packetSize, params.reverseDns ? 1 : 0, params.mpls ? 1 : 0,
+  params.mapTrace ? 1 : 0, params.dataProvider, created, created);
+  run("UPDATE agents SET status = 'busy', updated_at = ? WHERE id = ?", now(), agent.id);
+  traceParserState.set(id, { ttl: null });
+  const sent = sendAgent(agent.id, { type: 'trace.start', taskId: id, payload: params });
+  if (!sent) {
+    traceParserState.delete(id);
+    run("UPDATE trace_tasks SET status = 'failed', finished_at = ?, result_json = ? WHERE id = ?", now(), JSON.stringify({ error: 'Agent disconnected before task dispatch' }), id);
+    run("UPDATE agents SET status = 'offline', updated_at = ? WHERE id = ?", now(), agent.id);
+    throw Object.assign(new Error('Agent 已断开，任务未下发'), { status: 409 });
+  }
+  return get('SELECT * FROM trace_tasks WHERE id = ?', id);
+}
+
+export function cancelTrace(user, traceId) {
+  const trace = get('SELECT * FROM trace_tasks WHERE id = ?', String(traceId || ''));
+  if (!trace || (user.role !== 'admin' && trace.user_id !== user.id)) throw Object.assign(new Error('路由追踪任务不存在'), { status: 404 });
+  if (['completed', 'failed', 'cancelled', 'timeout'].includes(trace.status)) return traceView(trace);
+  sendAgent(trace.agent_id, { type: 'task.cancel', taskId: trace.id });
+  run("UPDATE trace_tasks SET status = 'cancelled', finished_at = ? WHERE id = ?", now(), trace.id);
+  run("UPDATE agents SET status = 'online', updated_at = ? WHERE id = ?", now(), trace.agent_id);
+  traceParserState.delete(trace.id);
+  emitTraceComplete(trace.id);
+  return traceView(get('SELECT * FROM trace_tasks WHERE id = ?', trace.id));
+}
+
+const traceCompletionHooks = new Set();
+export function onTraceComplete(hook) {
+  traceCompletionHooks.add(hook);
+  return () => traceCompletionHooks.delete(hook);
+}
+
+function emitTraceComplete(traceId) {
+  const trace = get('SELECT * FROM trace_tasks WHERE id = ?', traceId);
+  if (!trace) return;
+  const view = traceView(trace);
+  for (const hook of traceCompletionHooks) {
+    try { Promise.resolve(hook(trace, view)).catch((error) => console.error('[netpilot] trace completion hook failed:', error)); }
+    catch (error) { console.error('[netpilot] trace completion hook failed:', error); }
+  }
+}
+
 export function createTest(user, body = {}) {
   const agent = get('SELECT * FROM agents WHERE id = ? AND deleted_at IS NULL', String(body.agentId || ''));
   if (!agent || !canUseAgent(user, agent.id)) throw Object.assign(new Error('无权使用该 Agent'), { status: 403 });
@@ -508,6 +663,90 @@ function emitTaskComplete(taskId) {
   }
 }
 
+function upsertTraceHop(trace, ttl, fields) {
+  const existing = get('SELECT * FROM trace_hops WHERE trace_id = ? AND ttl = ?', trace.id, ttl);
+  const rtts = fields.rtts || (existing ? JSON.parse(existing.rtts_json || '[]') : []);
+  const values = {
+    address: fields.address ?? existing?.address ?? '*',
+    hostname: fields.hostname ?? existing?.hostname ?? '',
+    asn: fields.asn ?? existing?.asn ?? '',
+    details: fields.details ?? existing?.details ?? '',
+    rtts,
+    responses: fields.responses ?? rtts.filter((value) => value !== null).length
+  };
+  run(`INSERT INTO trace_hops (trace_id, ttl, address, hostname, asn, details, rtts_json, responses, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(trace_id, ttl) DO UPDATE SET address = excluded.address, hostname = excluded.hostname,
+       asn = excluded.asn, details = excluded.details, rtts_json = excluded.rtts_json,
+       responses = excluded.responses, updated_at = excluded.updated_at`,
+  trace.id, ttl, values.address, values.hostname, values.asn, values.details, JSON.stringify(values.rtts), values.responses, now(), now());
+  broadcastTask(trace, { type: 'trace.hop', taskId: trace.id, payload: { ttl, ...values } });
+}
+
+function parseTraceOutputLine(trace, rawLine) {
+  const line = String(rawLine || '').replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, '').replace(/\r/g, '');
+  const state = traceParserState.get(trace.id) || { ttl: null };
+  traceParserState.set(trace.id, state);
+  const hop = line.match(/^\s*(\d{1,2})\s+(.+)$/);
+  if (hop) {
+    const ttl = Number(hop[1]);
+    if (ttl >= 1 && ttl <= trace.max_hops) {
+      state.ttl = ttl;
+      const body = hop[2].trim();
+      if (body === '*') {
+        upsertTraceHop(trace, ttl, { address: '*', details: '本跳未响应', rtts: Array(trace.queries).fill(null), responses: 0 });
+        return;
+      }
+      const [address, ...rest] = body.split(/\s+/);
+      const details = rest.join(' ');
+      const asn = details.match(/\bAS\d+\b/i)?.[0]?.toUpperCase() || '';
+      upsertTraceHop(trace, ttl, { address, asn, details });
+      return;
+    }
+  }
+  if (!state.ttl || !/\bms\b/.test(line)) return;
+  const rtts = [...line.matchAll(/(\d+(?:\.\d+)?)\s*ms|\*\s*ms/g)].map((match) => match[1] === undefined ? null : Number(match[1]));
+  if (!rtts.length) return;
+  const firstRtt = line.search(/(?:\d+(?:\.\d+)?|\*)\s*ms/);
+  const hostname = firstRtt > 0 ? line.slice(0, firstRtt).trim() : '';
+  upsertTraceHop(trace, state.ttl, { ...(hostname ? { hostname } : {}), rtts, responses: rtts.filter((value) => value !== null).length });
+}
+
+function handleTraceMessage(agentId, message) {
+  const traceId = message.taskId || message.payload?.taskId;
+  if (!traceId) return false;
+  const trace = get('SELECT * FROM trace_tasks WHERE id = ? AND agent_id = ?', traceId, agentId);
+  if (!trace) return false;
+  const type = message.type;
+  if (type === 'trace.stdout' || type === 'trace.stderr') {
+    const line = String(message.payload?.line ?? message.line ?? '');
+    run('INSERT INTO trace_output (trace_id, stream, line, created_at) VALUES (?, ?, ?, ?)', traceId, type === 'trace.stderr' ? 'stderr' : 'stdout', line, now());
+    if (type === 'trace.stdout') parseTraceOutputLine(trace, line);
+    broadcastTask(trace, { type, taskId: traceId, payload: { line } });
+  } else if (type === 'trace.done') {
+    if (trace.status === 'cancelled') {
+      run("UPDATE agents SET status = 'online', updated_at = ? WHERE id = ?", now(), agentId);
+      return true;
+    }
+    const exitCode = Number(message.payload?.exitCode ?? 1);
+    const status = exitCode === 0 ? 'completed' : 'failed';
+    run('UPDATE trace_tasks SET status = ?, finished_at = ?, result_json = ? WHERE id = ?', status, now(), JSON.stringify(message.payload || {}), traceId);
+    run("UPDATE agents SET status = 'online', updated_at = ? WHERE id = ?", now(), agentId);
+    traceParserState.delete(traceId);
+    broadcastTask(trace, { type, taskId: traceId, payload: { ...(message.payload || {}), status } });
+    emitTraceComplete(traceId);
+  } else if (type === 'trace.error') {
+    if (trace.status !== 'cancelled') {
+      run("UPDATE trace_tasks SET status = 'failed', finished_at = ?, result_json = ? WHERE id = ?", now(), JSON.stringify(message.payload || {}), traceId);
+      run("UPDATE agents SET status = 'online', updated_at = ? WHERE id = ?", now(), agentId);
+      traceParserState.delete(traceId);
+      broadcastTask(trace, { type, taskId: traceId, payload: { ...(message.payload || {}), status: 'failed' } });
+      emitTraceComplete(traceId);
+    }
+  }
+  return true;
+}
+
 function handleAgentMessage(socket, agentId, message) {
   const type = message.type;
   if (type === 'agent.heartbeat') {
@@ -521,7 +760,8 @@ function handleAgentMessage(socket, agentId, message) {
   }
   if (type === 'agent.info') {
     const payload = message.payload || {};
-    run('UPDATE agents SET os = ?, arch = ?, version = ?, public_ip = COALESCE(NULLIF(?, \'\'), public_ip), ip_location = COALESCE(NULLIF(?, \'\'), ip_location), last_seen_at = ?, updated_at = ? WHERE id = ?', payload.os || 'linux', payload.arch || 'unknown', payload.version || '', payload.publicIp || '', payload.ipLocation || '', now(), now(), agentId);
+    const capabilities = Array.isArray(payload.capabilities) ? payload.capabilities.map(String) : ['iperf3'];
+    run('UPDATE agents SET os = ?, arch = ?, version = ?, capabilities = ?, nexttrace_version = ?, public_ip = COALESCE(NULLIF(?, \'\'), public_ip), ip_location = COALESCE(NULLIF(?, \'\'), ip_location), last_seen_at = ?, updated_at = ? WHERE id = ?', payload.os || 'linux', payload.arch || 'unknown', payload.version || '', JSON.stringify(capabilities), payload.nexttraceVersion || '', payload.publicIp || '', payload.ipLocation || '', now(), now(), agentId);
     maybeCompleteReconnectUpdate(agentId, payload.version);
     return;
   }
@@ -529,6 +769,7 @@ function handleAgentMessage(socket, agentId, message) {
     handleAgentUpdateMessage(agentId, message);
     return;
   }
+  if (type.startsWith('trace.') && handleTraceMessage(agentId, message)) return;
   const taskId = message.taskId || message.payload?.taskId;
   if (!taskId) return;
   const task = get('SELECT * FROM tests WHERE id = ? AND agent_id = ?', taskId, agentId);
@@ -571,6 +812,12 @@ function finalizeAgentDisconnect(agentId, attempt = 0) {
       run('UPDATE tests SET status = \'failed\', finished_at = ?, result_json = ? WHERE id = ?', now(), JSON.stringify({ error: 'Agent disconnected' }), active.id);
       emitTaskComplete(active.id);
     }
+    const activeTrace = get("SELECT id FROM trace_tasks WHERE agent_id = ? AND status IN ('queued', 'running')", agentId);
+    if (activeTrace) {
+      run("UPDATE trace_tasks SET status = 'failed', finished_at = ?, result_json = ? WHERE id = ?", now(), JSON.stringify({ error: 'Agent disconnected' }), activeTrace.id);
+      traceParserState.delete(activeTrace.id);
+      emitTraceComplete(activeTrace.id);
+    }
   } catch (error) {
     if ((error.errcode === 5 || String(error.message).includes('database is locked')) && attempt < 3) {
       const retry = setTimeout(() => finalizeAgentDisconnect(agentId, attempt + 1), 100 * (attempt + 1));
@@ -600,7 +847,8 @@ function handleAgentSocket(socket, req) {
       agentId = agent.id;
       agentConnections.set(agentId, socket);
       const payload = message.payload || {};
-      run(`UPDATE agents SET status = 'online', os = ?, arch = ?, version = ?, public_ip = ?, last_seen_at = ?, updated_at = ? WHERE id = ?`, payload.os || 'linux', payload.arch || 'unknown', payload.version || '', remoteIp(req), now(), now(), agentId);
+      const capabilities = Array.isArray(payload.capabilities) ? payload.capabilities.map(String) : ['iperf3'];
+      run(`UPDATE agents SET status = 'online', os = ?, arch = ?, version = ?, capabilities = ?, nexttrace_version = ?, public_ip = ?, last_seen_at = ?, updated_at = ? WHERE id = ?`, payload.os || 'linux', payload.arch || 'unknown', payload.version || '', JSON.stringify(capabilities), payload.nexttraceVersion || '', remoteIp(req), now(), now(), agentId);
       maybeCompleteReconnectUpdate(agentId, payload.version);
       socket.send(JSON.stringify({ type: 'agent.auth.ok', agentId, serverTime: now() }));
       return;
@@ -736,7 +984,9 @@ async function handleApi(req, res, pathname) {
           githubAccelDomain: settings.github_accel_domain || '',
           telegramBotToken: settings.telegram_bot_token || '',
           telegramBotEnabled: Boolean(settings.telegram_bot_token),
-          telegramBotUsername: settings.telegram_bot_username || ''
+          telegramBotUsername: settings.telegram_bot_username || '',
+          nexttraceDataProvider: nextTraceProviders.has(settings.nexttrace_data_provider) ? settings.nexttrace_data_provider : 'disable-geoip',
+          nexttraceMapEnabled: settings.nexttrace_map_enabled === '1'
         }
       });
     }
@@ -751,6 +1001,9 @@ async function handleApi(req, res, pathname) {
       const enabled = Boolean(body.githubAccelEnabled);
       if (enabled && !githubAccelDomain) return json(res, 400, { error: '启用 GitHub 加速时必须填写加速域名' });
       const currentSettings = getSettings();
+      const nexttraceDataProvider = String(body.nexttraceDataProvider || 'disable-geoip');
+      if (!nextTraceProviders.has(nexttraceDataProvider)) return json(res, 400, { error: 'NextTrace IP 数据源无效' });
+      const nexttraceMapEnabled = Boolean(body.nexttraceMapEnabled);
       const telegramTokenSubmitted = Object.hasOwn(body, 'telegramBotToken');
       const telegramBotToken = telegramTokenSubmitted ? String(body.telegramBotToken || '').trim() : (currentSettings.telegram_bot_token || '');
       if (telegramTokenSubmitted && telegramBotToken && !/^\d{6,12}:[A-Za-z0-9_-]{30,60}$/.test(telegramBotToken)) return json(res, 400, { error: 'Telegram Bot Token 格式无效' });
@@ -762,13 +1015,15 @@ async function handleApi(req, res, pathname) {
       setSetting('script_base', scriptBase);
       setSetting('github_accel_enabled', enabled ? '1' : '0');
       setSetting('github_accel_domain', githubAccelDomain);
+      setSetting('nexttrace_data_provider', nexttraceDataProvider);
+      setSetting('nexttrace_map_enabled', nexttraceMapEnabled ? '1' : '0');
       if (telegramTokenSubmitted) {
         setSetting('telegram_bot_token', telegramBotToken);
         setSetting('telegram_bot_username', telegramBotUsername);
       }
       latestReleaseCache.checkedAt = 0;
       if (telegramTokenChanged && typeof globalThis.netpilotTelegramReload === 'function') globalThis.netpilotTelegramReload();
-      audit(user.id, 'settings.update', 'settings', { agentWsBase, scriptBase, githubAccelEnabled: enabled, githubAccelDomain, telegramBotToken: telegramTokenChanged ? (telegramBotToken ? 'updated' : 'cleared') : 'unchanged' });
+      audit(user.id, 'settings.update', 'settings', { agentWsBase, scriptBase, githubAccelEnabled: enabled, githubAccelDomain, nexttraceDataProvider, nexttraceMapEnabled, telegramBotToken: telegramTokenChanged ? (telegramBotToken ? 'updated' : 'cleared') : 'unchanged' });
       return json(res, 200, { ok: true, telegramBot: { enabled: Boolean(telegramBotToken), username: telegramBotUsername } });
     }
     return json(res, 405, { error: 'Method not allowed' });
@@ -789,6 +1044,35 @@ async function handleApi(req, res, pathname) {
       const test = createTest(user, body);
       audit(user.id, 'test.create', test.id, { agentId: test.agent_id, target: test.target, protocol: test.protocol });
       return json(res, 201, { test: taskView(test) });
+    } catch (error) {
+      return json(res, error.status || 500, { error: error.status ? error.message : 'Internal server error' });
+    }
+  }
+  if (req.method === 'GET' && pathname === '/api/traces') {
+    const rows = user.role === 'admin' ? all('SELECT * FROM trace_tasks ORDER BY created_at DESC LIMIT 50') : all('SELECT * FROM trace_tasks WHERE user_id = ? ORDER BY created_at DESC LIMIT 50', user.id);
+    const settings = getSettings();
+    return json(res, 200, {
+      traces: rows.map(traceView),
+      config: {
+        dataProvider: nextTraceProviders.has(settings.nexttrace_data_provider) ? settings.nexttrace_data_provider : 'disable-geoip',
+        mapEnabled: settings.nexttrace_map_enabled === '1'
+      }
+    });
+  }
+  if (req.method === 'POST' && pathname === '/api/traces') {
+    const body = await bodyJson(req);
+    try {
+      const trace = createTrace(user, body);
+      audit(user.id, 'trace.create', trace.id, { agentId: trace.agent_id, target: trace.target, protocol: trace.protocol });
+      return json(res, 201, { trace: traceView(trace) });
+    } catch (error) {
+      return json(res, error.status || 500, { error: error.status ? error.message : 'Internal server error' });
+    }
+  }
+  const traceCancel = pathname.match(/^\/api\/traces\/([^/]+)\/cancel$/);
+  if (req.method === 'POST' && traceCancel) {
+    try {
+      return json(res, 200, { trace: cancelTrace(user, traceCancel[1]) });
     } catch (error) {
       return json(res, error.status || 500, { error: error.status ? error.message : 'Internal server error' });
     }
@@ -1012,6 +1296,9 @@ globalThis.netpilotServerApi = {
   createTest,
   cancelTest,
   onTaskComplete,
+  createTrace,
+  cancelTrace,
+  onTraceComplete,
   audit
 };
 

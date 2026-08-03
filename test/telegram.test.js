@@ -59,6 +59,9 @@ test('Telegram picker binds callbacks to requester and rejects other users', asy
     assert.deepEqual(telegramTest.parseTargetInput('198.51.100.1:5202'), { target: '198.51.100.1', port: 5202 });
     assert.deepEqual(telegramTest.parseTargetInput('[2001:db8::1]:5203'), { target: '2001:db8::1', port: 5203 });
     assert.equal(telegramTest.parseTargetInput('198.51.100.1:70000'), null);
+    assert.deepEqual(telegramTest.parseNextTraceArgs(['1.1.1.1']), { target: '1.1.1.1', addressFamily: 'auto', protocol: 'icmp', port: null, queries: 3, maxHops: 30, timeoutMs: 1000, parallelRequests: 18, packetSize: 0, reverseDns: true, mpls: true, mapTrace: false });
+    assert.deepEqual(telegramTest.parseNextTraceArgs(['-T', '-p', '443', '-4', '-q', '5', '--psize=128', 'example.com']), { target: 'example.com', addressFamily: 'ipv4', protocol: 'tcp', port: 443, queries: 5, maxHops: 30, timeoutMs: 1000, parallelRequests: 18, packetSize: 128, reverseDns: true, mpls: true, mapTrace: false });
+    assert.equal(telegramTest.parseNextTraceArgs(['--json', '1.1.1.1']), null);
   } finally {
     globalThis.netpilotServerApi = originalApi;
     globalThis.fetch = originalFetch;
@@ -395,7 +398,7 @@ test('Telegram registers its command menu when the Bot starts', async () => {
     await module.startTelegramBot();
     const registration = requests.find((request) => request.url.endsWith('/setMyCommands'));
     assert.ok(registration);
-    assert.deepEqual(registration.body.commands.map((command) => command.command), ['help', 'status', 'bind', 'agents', 'iperf']);
+    assert.deepEqual(registration.body.commands.map((command) => command.command), ['help', 'status', 'bind', 'agents', 'iperf', 'nexttrace']);
   } finally {
     if (originalDisable === undefined) delete process.env.NETPILOT_DISABLE_TELEGRAM;
     else process.env.NETPILOT_DISABLE_TELEGRAM = originalDisable;

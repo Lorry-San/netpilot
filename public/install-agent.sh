@@ -7,6 +7,7 @@ TOKEN="${NETPILOT_TOKEN:-}"
 AGENT_ID="${NETPILOT_AGENT_ID:-}"
 AGENT_NAME="${NETPILOT_AGENT_NAME:-}"
 ACCEL="${NETPILOT_GITHUB_ACCEL:-}"
+NEXTTRACE_VERSION="v1.7.1"
 if [ -n "$ACCEL" ] && [ "${ACCEL%/}" = "$ACCEL" ]; then ACCEL="${ACCEL}/"; fi
 
 if [ "$(id -u)" -ne 0 ]; then
@@ -43,11 +44,42 @@ download() {
   fi
 }
 
+install_nexttrace() {
+  case "$ARCH" in
+    amd64) checksum="1f4c559cbdf6f667a1a9e050567c9cf1fc11741e8cc1e50f5fdcaf2dbb247232" ;;
+    arm64) checksum="9c2f1b79e7d0e37f59ebe685aec1d5c41fb8f3407f54e17b34656712eaa66fd9" ;;
+  esac
+  url="${ACCEL}https://github.com/nxtrace/NTrace-core/releases/download/${NEXTTRACE_VERSION}/nexttrace_linux_${ARCH}"
+  download "$url" /usr/local/bin/nexttrace.tmp
+  download "${ACCEL}https://github.com/nxtrace/NTrace-core/raw/${NEXTTRACE_VERSION}/LICENSE" /tmp/netpilot-nexttrace-license
+  actual="$(sha256sum /usr/local/bin/nexttrace.tmp | awk '{ print $1 }')"
+  if [ "$actual" != "$checksum" ]; then
+    rm -f /usr/local/bin/nexttrace.tmp
+    echo "NextTrace checksum verification failed." >&2
+    exit 1
+  fi
+  license_actual="$(sha256sum /tmp/netpilot-nexttrace-license | awk '{ print $1 }')"
+  if [ "$license_actual" != "3972dc9744f6499f0f9b2dbf76696f2ae7ad8af9b23dde66d6af86c9dfb36986" ]; then
+    rm -f /usr/local/bin/nexttrace.tmp /tmp/netpilot-nexttrace-license
+    echo "NextTrace license checksum verification failed." >&2
+    exit 1
+  fi
+  chmod 0755 /usr/local/bin/nexttrace.tmp
+  mv /usr/local/bin/nexttrace.tmp /usr/local/bin/nexttrace
+  mkdir -p /usr/share/licenses/nexttrace
+  mv /tmp/netpilot-nexttrace-license /usr/share/licenses/nexttrace/LICENSE
+}
+
 escape_value() {
   printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
 }
 
 install_iperf3
+if ! command -v sha256sum >/dev/null 2>&1; then
+  echo "sha256sum is required to verify NextTrace." >&2
+  exit 1
+fi
+install_nexttrace
 DOWNLOAD_URL="${ACCEL}https://github.com/${REPO}/releases/latest/download/netpilot-agent-linux-${ARCH}"
 download "$DOWNLOAD_URL" /usr/local/bin/netpilot-agent.tmp
 chmod 0755 /usr/local/bin/netpilot-agent.tmp
@@ -66,7 +98,7 @@ chmod 0600 /etc/netpilot-agent/env
 if command -v systemctl >/dev/null 2>&1; then
   cat > /etc/systemd/system/netpilot-agent.service <<'UNIT'
 [Unit]
-Description=NetPilot iperf3 Agent
+Description=NetPilot Network Test Agent
 After=network-online.target
 Wants=network-online.target
 
@@ -77,6 +109,8 @@ ExecStart=/usr/local/bin/netpilot-agent
 Restart=always
 RestartSec=5
 NoNewPrivileges=true
+CapabilityBoundingSet=CAP_NET_RAW
+AmbientCapabilities=CAP_NET_RAW
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
@@ -89,7 +123,7 @@ UNIT
 elif command -v rc-service >/dev/null 2>&1; then
   cat > /etc/init.d/netpilot-agent <<'OPENRC'
 #!/sbin/openrc-run
-description="NetPilot iperf3 Agent"
+description="NetPilot Network Test Agent"
 
 . /etc/netpilot-agent/env
 export NETPILOT_SERVER NETPILOT_TOKEN NETPILOT_AGENT_ID NETPILOT_AGENT_NAME
@@ -110,4 +144,4 @@ else
   echo "Start it with: set -a; . /etc/netpilot-agent/env; set +a; netpilot-agent"
 fi
 
-echo "NetPilot Agent installed for ${ARCH}."
+echo "NetPilot Agent with NextTrace ${NEXTTRACE_VERSION} installed for ${ARCH}."

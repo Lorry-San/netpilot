@@ -33,6 +33,8 @@ db.exec(`
     os TEXT NOT NULL DEFAULT 'linux',
     arch TEXT NOT NULL DEFAULT 'unknown',
     version TEXT NOT NULL DEFAULT '',
+    capabilities TEXT NOT NULL DEFAULT '["iperf3"]',
+    nexttrace_version TEXT NOT NULL DEFAULT '',
     public_ip TEXT NOT NULL DEFAULT '',
     ip_location TEXT NOT NULL DEFAULT '',
     cpu_percent REAL NOT NULL DEFAULT 0,
@@ -84,6 +86,51 @@ db.exec(`
     memory_percent REAL,
     created_at TEXT NOT NULL
   );
+  CREATE TABLE IF NOT EXISTS trace_tasks (
+    id TEXT PRIMARY KEY,
+    user_id INTEGER NOT NULL REFERENCES users(id),
+    agent_id TEXT NOT NULL REFERENCES agents(id),
+    target TEXT NOT NULL,
+    address_family TEXT NOT NULL CHECK (address_family IN ('auto', 'ipv4', 'ipv6')),
+    protocol TEXT NOT NULL CHECK (protocol IN ('icmp', 'tcp', 'udp')),
+    port INTEGER,
+    queries INTEGER NOT NULL DEFAULT 3,
+    max_hops INTEGER NOT NULL DEFAULT 30,
+    timeout_ms INTEGER NOT NULL DEFAULT 1000,
+    parallel_requests INTEGER NOT NULL DEFAULT 18,
+    packet_size INTEGER NOT NULL DEFAULT 0,
+    reverse_dns INTEGER NOT NULL DEFAULT 1,
+    mpls INTEGER NOT NULL DEFAULT 1,
+    map_trace INTEGER NOT NULL DEFAULT 0,
+    data_provider TEXT NOT NULL DEFAULT 'disable-geoip',
+    status TEXT NOT NULL CHECK (status IN ('queued', 'running', 'completed', 'failed', 'cancelled', 'timeout')),
+    started_at TEXT,
+    finished_at TEXT,
+    result_json TEXT,
+    created_at TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS trace_tasks_user_idx ON trace_tasks(user_id, created_at DESC);
+  CREATE TABLE IF NOT EXISTS trace_output (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    trace_id TEXT NOT NULL REFERENCES trace_tasks(id) ON DELETE CASCADE,
+    stream TEXT NOT NULL,
+    line TEXT NOT NULL,
+    created_at TEXT NOT NULL
+  );
+  CREATE TABLE IF NOT EXISTS trace_hops (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    trace_id TEXT NOT NULL REFERENCES trace_tasks(id) ON DELETE CASCADE,
+    ttl INTEGER NOT NULL,
+    address TEXT NOT NULL DEFAULT '*',
+    hostname TEXT NOT NULL DEFAULT '',
+    asn TEXT NOT NULL DEFAULT '',
+    details TEXT NOT NULL DEFAULT '',
+    rtts_json TEXT NOT NULL DEFAULT '[]',
+    responses INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(trace_id, ttl)
+  );
   CREATE TABLE IF NOT EXISTS settings (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL,
@@ -125,6 +172,12 @@ db.exec(`
 const agentColumns = db.prepare('PRAGMA table_info(agents)').all();
 if (!agentColumns.some((column) => column.name === 'deleted_at')) {
   db.exec('ALTER TABLE agents ADD COLUMN deleted_at TEXT;');
+}
+if (!agentColumns.some((column) => column.name === 'capabilities')) {
+  db.exec(`ALTER TABLE agents ADD COLUMN capabilities TEXT NOT NULL DEFAULT '["iperf3"]';`);
+}
+if (!agentColumns.some((column) => column.name === 'nexttrace_version')) {
+  db.exec("ALTER TABLE agents ADD COLUMN nexttrace_version TEXT NOT NULL DEFAULT ''; ");
 }
 
 export function now() {

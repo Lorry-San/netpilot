@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -50,6 +51,23 @@ type taskParams struct {
 	Duration  int    `json:"duration"`
 	Parallel  int    `json:"parallel"`
 	Bandwidth string `json:"bandwidth"`
+}
+
+type traceParams struct {
+	Target           string `json:"target"`
+	AddressFamily    string `json:"addressFamily"`
+	Protocol         string `json:"protocol"`
+	Port             int    `json:"port"`
+	Queries          int    `json:"queries"`
+	MaxHops          int    `json:"maxHops"`
+	TimeoutMS        int    `json:"timeoutMs"`
+	ParallelRequests int    `json:"parallelRequests"`
+	PacketSize       int    `json:"packetSize"`
+	ReverseDNS       bool   `json:"reverseDns"`
+	MPLS             bool   `json:"mpls"`
+	MapTrace         bool   `json:"mapTrace"`
+	DataProvider     string `json:"dataProvider"`
+	AllowPrivate     bool   `json:"allowPrivate"`
 }
 
 type updateParams struct {
@@ -171,6 +189,38 @@ func normalizeTask(raw map[string]any) (taskParams, error) {
 		if !regexp.MustCompile(`^[0-9]+(?:\.[0-9]+)?[KMG]?$`).MatchString(task.Bandwidth) {
 			return task, errors.New("invalid UDP bandwidth")
 		}
+	}
+	return task, nil
+}
+
+func normalizeTrace(raw map[string]any) (traceParams, error) {
+	data, err := json.Marshal(raw)
+	if err != nil {
+		return traceParams{}, err
+	}
+	var task traceParams
+	if err := json.Unmarshal(data, &task); err != nil {
+		return task, err
+	}
+	if strings.TrimSpace(task.Target) == "" || len(task.Target) > 253 {
+		return task, errors.New("invalid trace target")
+	}
+	if task.AddressFamily != "auto" && task.AddressFamily != "ipv4" && task.AddressFamily != "ipv6" {
+		return task, errors.New("address family must be auto, ipv4 or ipv6")
+	}
+	if task.Protocol != "icmp" && task.Protocol != "tcp" && task.Protocol != "udp" {
+		return task, errors.New("trace protocol must be icmp, tcp or udp")
+	}
+	if task.Protocol != "icmp" && (task.Port < 1 || task.Port > 65535) {
+		return task, errors.New("invalid trace port")
+	}
+	validQueries := task.Queries == 1 || task.Queries == 3 || task.Queries == 5 || task.Queries == 10
+	if !validQueries || task.MaxHops < 1 || task.MaxHops > 64 || task.TimeoutMS < 100 || task.TimeoutMS > 10000 || task.ParallelRequests < 1 || task.ParallelRequests > 64 || task.PacketSize < 0 || task.PacketSize > 65535 {
+		return task, errors.New("trace parameters are outside allowed ranges")
+	}
+	providers := map[string]bool{"disable-geoip": true, "IPInfoLocal": true, "IP.SB": true, "IPInfo": true, "IPInsight": true, "IPAPI.com": true, "ip-api.com": true, "chunzhen": true, "ipdb.one": true, "LeoMoeAPI": true}
+	if !providers[task.DataProvider] {
+		return task, errors.New("unsupported trace data provider")
 	}
 	return task, nil
 }
@@ -329,6 +379,69 @@ func iperfArgs(task taskParams) []string {
 	return args
 }
 
+func prohibitedTraceIP(ip net.IP) bool {
+	if ip == nil || ip.IsUnspecified() || ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsMulticast() {
+		return true
+	}
+	if v4 := ip.To4(); v4 != nil {
+		return v4[0] == 0 || v4[0] >= 224 || (v4[0] == 100 && v4[1] >= 64 && v4[1] <= 127) || (v4[0] == 198 && (v4[1] == 18 || v4[1] == 19))
+	}
+	return false
+}
+
+func resolveTraceTarget(ctx context.Context, task traceParams) (string, error) {
+	addresses, err := net.DefaultResolver.LookupIP(ctx, "ip", task.Target)
+	if err != nil {
+		return "", fmt.Errorf("cannot resolve trace target: %w", err)
+	}
+	if len(addresses) == 0 {
+		return "", errors.New("trace target has no DNS addresses")
+	}
+	for _, ip := range addresses {
+		if task.AddressFamily == "ipv4" && ip.To4() == nil {
+			continue
+		}
+		if task.AddressFamily == "ipv6" && ip.To4() != nil {
+			continue
+		}
+		if !task.AllowPrivate && prohibitedTraceIP(ip) {
+			continue
+		}
+		return ip.String(), nil
+	}
+	if task.AllowPrivate {
+		return "", errors.New("target has no address matching the selected address family")
+	}
+	return "", errors.New("target resolves only to private or reserved addresses")
+}
+
+func nextTraceArgs(task traceParams, target string) []string {
+	args := []string{"--no-color", "--language", "cn", "--data-provider", task.DataProvider, "--queries", strconv.Itoa(task.Queries), "--max-hops", strconv.Itoa(task.MaxHops), "--timeout", strconv.Itoa(task.TimeoutMS), "--parallel-requests", strconv.Itoa(task.ParallelRequests)}
+	if task.AddressFamily == "ipv4" {
+		args = append(args, "-4")
+	} else if task.AddressFamily == "ipv6" {
+		args = append(args, "-6")
+	}
+	if task.Protocol == "tcp" {
+		args = append(args, "--tcp", "--port", strconv.Itoa(task.Port))
+	} else if task.Protocol == "udp" {
+		args = append(args, "--udp", "--port", strconv.Itoa(task.Port))
+	}
+	if task.PacketSize > 0 {
+		args = append(args, "--psize", strconv.Itoa(task.PacketSize))
+	}
+	if !task.ReverseDNS {
+		args = append(args, "--no-rdns")
+	}
+	if !task.MPLS {
+		args = append(args, "--disable-mpls")
+	}
+	if !task.MapTrace {
+		args = append(args, "--map")
+	}
+	return append(args, target)
+}
+
 func parseMetric(line string) (map[string]any, bool) {
 	bitrate := bitratePattern.FindStringSubmatch(line)
 	interval := intervalPattern.FindStringSubmatch(line)
@@ -361,6 +474,15 @@ func streamOutput(c *client, taskID, stream string, reader io.Reader, wg *sync.W
 				_ = c.send(message{Type: "task.metric", TaskID: taskID, Payload: metric})
 			}
 		}
+	}
+}
+
+func streamTraceOutput(c *client, taskID, stream string, reader io.Reader, wg *sync.WaitGroup) {
+	defer wg.Done()
+	scanner := bufio.NewScanner(reader)
+	scanner.Buffer(make([]byte, 64*1024), 1024*1024)
+	for scanner.Scan() {
+		_ = c.send(message{Type: "trace." + stream, TaskID: taskID, Payload: map[string]any{"line": scanner.Text()}})
 	}
 }
 
@@ -413,6 +535,68 @@ func executeTask(parent context.Context, c *client, taskID string, raw map[strin
 		}
 	}
 	_ = c.send(message{Type: "task.done", TaskID: taskID, Payload: map[string]any{"exitCode": exitCode, "durationMs": time.Since(started).Milliseconds()}})
+}
+
+func executeTrace(parent context.Context, c *client, taskID string, raw map[string]any) {
+	task, err := normalizeTrace(raw)
+	if err != nil {
+		_ = c.send(message{Type: "trace.error", TaskID: taskID, Payload: map[string]any{"error": err.Error()}})
+		return
+	}
+	seconds := 30 + (task.MaxHops*task.Queries*task.TimeoutMS)/1000
+	if seconds < 60 {
+		seconds = 60
+	}
+	if seconds > 600 {
+		seconds = 600
+	}
+	ctx, cancel := context.WithTimeout(parent, time.Duration(seconds)*time.Second)
+	if !c.setTask(taskID, cancel) {
+		cancel()
+		_ = c.send(message{Type: "trace.error", TaskID: taskID, Payload: map[string]any{"error": "agent is already running a task"}})
+		return
+	}
+	defer func() {
+		cancel()
+		c.finishTask(taskID)
+	}()
+	target, err := resolveTraceTarget(ctx, task)
+	if err != nil {
+		_ = c.send(message{Type: "trace.error", TaskID: taskID, Payload: map[string]any{"error": err.Error()}})
+		return
+	}
+	cmd := exec.CommandContext(ctx, "nexttrace", nextTraceArgs(task, target)...)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		_ = c.send(message{Type: "trace.error", TaskID: taskID, Payload: map[string]any{"error": err.Error()}})
+		return
+	}
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		_ = c.send(message{Type: "trace.error", TaskID: taskID, Payload: map[string]any{"error": err.Error()}})
+		return
+	}
+	started := time.Now()
+	if err := cmd.Start(); err != nil {
+		_ = c.send(message{Type: "trace.error", TaskID: taskID, Payload: map[string]any{"error": err.Error()}})
+		return
+	}
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go streamTraceOutput(c, taskID, "stdout", stdout, &wg)
+	go streamTraceOutput(c, taskID, "stderr", stderr, &wg)
+	err = cmd.Wait()
+	wg.Wait()
+	exitCode := 0
+	if err != nil {
+		exitCode = -1
+		var exitError *exec.ExitError
+		if errors.As(err, &exitError) {
+			exitCode = exitError.ExitCode()
+		}
+	}
+	_ = c.send(message{Type: "trace.done", TaskID: taskID, Payload: map[string]any{"exitCode": exitCode, "durationMs": time.Since(started).Milliseconds()}})
 }
 
 func streamUpdateOutput(c *client, updateID string, reader io.Reader, latestVersion *string, versionMu *sync.Mutex, wg *sync.WaitGroup) {
@@ -653,6 +837,23 @@ func heartbeatLoop(ctx context.Context, c *client) {
 	}
 }
 
+func agentCapabilities() ([]string, string) {
+	capabilities := []string{"iperf3"}
+	path, err := exec.LookPath("nexttrace")
+	if err != nil {
+		return capabilities, ""
+	}
+	capabilities = append(capabilities, "nexttrace")
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	output, err := exec.CommandContext(ctx, path, "--version").CombinedOutput()
+	if err != nil {
+		return capabilities, ""
+	}
+	match := regexp.MustCompile(`v?\d+\.\d+\.\d+`).FindString(string(output))
+	return capabilities, match
+}
+
 func connect(ctx context.Context, cfg config) error {
 	conn, _, err := websocket.DefaultDialer.DialContext(ctx, cfg.Server, nil)
 	if err != nil {
@@ -660,7 +861,8 @@ func connect(ctx context.Context, cfg config) error {
 	}
 	defer conn.Close()
 	c := &client{conn: conn}
-	if err := c.send(message{Type: "agent.auth", Token: cfg.Token, Payload: map[string]any{"agentId": cfg.AgentID, "name": cfg.Name, "os": runtime.GOOS, "arch": runtime.GOARCH, "version": version}}); err != nil {
+	capabilities, nexttraceVersion := agentCapabilities()
+	if err := c.send(message{Type: "agent.auth", Token: cfg.Token, Payload: map[string]any{"agentId": cfg.AgentID, "name": cfg.Name, "os": runtime.GOOS, "arch": runtime.GOARCH, "version": version, "capabilities": capabilities, "nexttraceVersion": nexttraceVersion}}); err != nil {
 		return err
 	}
 	conn.SetReadDeadline(time.Now().Add(15 * time.Second))
@@ -675,7 +877,7 @@ func connect(ctx context.Context, cfg config) error {
 	connectionCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	go heartbeatLoop(connectionCtx, c)
-	_ = c.send(message{Type: "agent.info", Payload: map[string]any{"os": runtime.GOOS, "arch": runtime.GOARCH, "version": version, "name": cfg.Name}})
+	_ = c.send(message{Type: "agent.info", Payload: map[string]any{"os": runtime.GOOS, "arch": runtime.GOARCH, "version": version, "name": cfg.Name, "capabilities": capabilities, "nexttraceVersion": nexttraceVersion}})
 	for {
 		var incoming message
 		if err := conn.ReadJSON(&incoming); err != nil {
@@ -684,6 +886,8 @@ func connect(ctx context.Context, cfg config) error {
 		switch incoming.Type {
 		case "task.start":
 			go executeTask(connectionCtx, c, incoming.TaskID, incoming.Payload)
+		case "trace.start":
+			go executeTrace(connectionCtx, c, incoming.TaskID, incoming.Payload)
 		case "task.cancel":
 			c.cancel(incoming.TaskID)
 		case "agent.update.start":

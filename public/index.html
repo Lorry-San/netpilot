@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>NetPilot</title>
-  <link rel="stylesheet" href="/styles.css?v=0.1.17">
+  <link rel="stylesheet" href="/styles.css?v=0.1.18">
 </head>
 <body>
   <main id="login-view" class="login-shell">
@@ -23,6 +23,7 @@
       <div class="brand"><span class="brand-mark">N</span><strong>NetPilot</strong></div>
       <nav>
         <button data-view="tests" class="active">测试台</button>
+        <button data-view="traces">路由追踪</button>
         <button data-view="agents">Agent</button>
         <button data-view="telegram">Telegram</button>
         <button data-view="users" data-admin-only>用户管理</button>
@@ -78,6 +79,37 @@
         <section class="panel"><div class="panel-heading"><h2>最近任务</h2><button id="refresh-tests" class="secondary" type="button">刷新</button></div><div class="table-wrap"><table><thead><tr><th>目标</th><th>Agent</th><th>协议</th><th>状态</th><th>创建时间</th></tr></thead><tbody id="tests-body"></tbody></table></div></section>
       </section>
 
+      <section id="view-traces" class="page" hidden>
+        <div class="trace-grid">
+          <form id="trace-form" class="panel form-grid">
+            <div class="panel-heading"><h2>NextTrace 参数</h2><span id="trace-state" class="status">就绪</span></div>
+            <label>执行 Agent<select id="trace-agent" required></select></label>
+            <label>目标 IP / 域名<input id="trace-target" value="1.1.1.1" required></label>
+            <fieldset><legend>地址族</legend><div class="segmented three"><label><input type="radio" name="trace-family" value="auto" checked>自动</label><label><input type="radio" name="trace-family" value="ipv4">IPv4</label><label><input type="radio" name="trace-family" value="ipv6">IPv6</label></div></fieldset>
+            <fieldset><legend>探测协议</legend><div class="segmented three"><label><input type="radio" name="trace-protocol" value="icmp" checked>ICMP</label><label><input type="radio" name="trace-protocol" value="tcp">TCP</label><label><input type="radio" name="trace-protocol" value="udp">UDP</label></div></fieldset>
+            <div class="split"><label>目标端口<input id="trace-port" type="number" min="1" max="65535" value="80" disabled></label><label>每跳采样<select id="trace-queries"><option>1</option><option selected>3</option><option>5</option><option>10</option></select></label></div>
+            <details class="trace-advanced"><summary>高级设置</summary><div class="trace-advanced-fields">
+              <div class="split equal"><label>最大跳数<input id="trace-max-hops" type="number" min="1" max="64" value="30"></label><label>超时 (ms)<input id="trace-timeout" type="number" min="100" max="10000" step="100" value="1000"></label></div>
+              <div class="split equal"><label>并发探测<input id="trace-parallel" type="number" min="1" max="64" value="18"></label><label>包大小 (字节)<input id="trace-packet-size" type="number" min="0" max="65535" value="0"><small>0 表示协议默认最小包。</small></label></div>
+              <label class="switch-row"><span>反向 DNS</span><input id="trace-rdns" type="checkbox" checked></label>
+              <label class="switch-row"><span>显示 MPLS</span><input id="trace-mpls" type="checkbox" checked></label>
+              <label class="switch-row"><span>生成外部路径地图</span><input id="trace-map" type="checkbox" disabled></label>
+              <div class="readonly-field"><span>IP 数据源</span><strong id="trace-provider">已关闭</strong></div>
+            </div></details>
+            <button id="start-trace" class="primary" type="submit">开始追踪</button>
+          </form>
+          <div class="trace-results">
+            <section class="panel">
+              <div class="panel-heading"><div><h2 id="trace-result-title">路由明细</h2><small id="trace-result-meta">等待路由追踪任务。</small></div><button id="cancel-trace" class="secondary" type="button" disabled>取消</button></div>
+              <div class="trace-tabs"><button id="trace-tab-hops" class="active" type="button">路由明细</button><button id="trace-tab-raw" type="button">原始输出</button></div>
+              <div id="trace-hops-view" class="table-wrap"><table class="trace-hop-table"><thead><tr><th>跳</th><th>节点</th><th>网络 / 位置</th><th>RTT</th><th>响应</th></tr></thead><tbody id="trace-hops-body"></tbody></table></div>
+              <pre id="trace-raw-output" hidden>等待路由追踪任务。</pre>
+            </section>
+          </div>
+        </div>
+        <section class="panel"><div class="panel-heading"><h2>最近路由追踪</h2><button id="refresh-traces" class="secondary" type="button">刷新</button></div><div class="table-wrap"><table><thead><tr><th>目标</th><th>Agent</th><th>协议</th><th>跳数</th><th>状态</th><th>创建时间</th></tr></thead><tbody id="traces-body"></tbody></table></div></section>
+      </section>
+
       <section id="view-agents" class="page" hidden>
         <section class="panel"><div class="panel-heading"><h2>Agent 节点</h2><button id="add-agent" class="primary" data-admin-only type="button">添加 Agent</button></div><div class="table-wrap"><table><thead><tr><th>名称</th><th>状态</th><th>平台</th><th>公网 IP / 归属地</th><th>资源</th><th>操作</th></tr></thead><tbody id="agents-body"></tbody></table></div></section>
         <section id="install-panel" class="panel" hidden><div class="panel-heading"><h2>安装 Agent</h2><button id="close-install" class="secondary" type="button">关闭</button></div><div class="install-content"><p>Token 仅在本次生成后展示。Agent 在线时不能重新生成安装命令。</p><label>Docker（Alpine x86-64）<textarea id="install-docker" rows="5" readonly></textarea></label><button class="secondary copy-command" data-target="install-docker">复制 Docker 命令</button><label>一键安装脚本（自动识别 x86-64 / arm64）<textarea id="install-script" rows="4" readonly></textarea></label><button class="secondary copy-command" data-target="install-script">复制脚本命令</button></div></section>
@@ -106,6 +138,7 @@
               <div><code>/agents</code><span>查看当前账户可用的在线 Agent</span></div>
               <div><code>/iperf</code><span>选择 Agent 和上/下行，再到 Bot 私聊输入 IP:端口</span></div>
               <div><code>/iperf IP [端口] [线程] [时长] [-R]</code><span>快捷测速默认上行；显式 -R 为下行</span></div>
+              <div><code>/nexttrace [参数] 目标</code><span>选择一个 Agent 后立即开始路由追踪</span></div>
             </div>
           </section>
         </div>
@@ -154,6 +187,11 @@
                 <input id="setting-telegram-token" type="password" autocomplete="off" placeholder="123456789:AA...">
                 <small>仅 uid=1 可查看和修改。留空会停用 Telegram Bot。<span id="setting-telegram-status">当前未启用</span></small>
               </label>
+              <label>NextTrace IP 数据源
+                <select id="setting-nexttrace-provider"><option value="disable-geoip">关闭地理信息</option><option>IPInfoLocal</option><option>IP.SB</option><option>IPInfo</option><option>IPInsight</option><option>IPAPI.com</option><option>ip-api.com</option><option>chunzhen</option><option>ipdb.one</option><option>LeoMoeAPI</option></select>
+                <small>第三方服务必须由管理员确认具备使用授权；公共实例不会默认使用 LeoMoeAPI。</small>
+              </label>
+              <label class="switch-row"><span>允许生成外部路径地图</span><input id="setting-nexttrace-map" type="checkbox"></label>
             </div>
           </form>
           <section class="panel version-panel">
@@ -248,6 +286,6 @@
   </dialog>
 
   <div id="toast" role="status" aria-live="polite"></div>
-  <script type="module" src="/app.js?v=0.1.17"></script>
+  <script type="module" src="/app.js?v=0.1.18"></script>
 </body>
 </html>

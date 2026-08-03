@@ -443,6 +443,23 @@ test('Telegram rejects unbound private messages and permits public-group members
     await telegramTest.handleMessage({ from: { id: 99 }, chat: { id: 99, type: 'private' }, text: '/help' });
     assert.match(requests.at(-1).text, /未授权/);
 
+    const privateGroup = { id: -1001, type: 'group', title: 'Private Group' };
+    const requestCount = requests.length;
+    await telegramTest.handleMessage({
+      message_id: 10,
+      reply_to_message: { message_id: 9, from: { is_bot: true } },
+      from: { id: 99 },
+      chat: privateGroup,
+      text: '这是回复 Bot 的普通群聊消息'
+    });
+    await telegramTest.handleMessage({ message_id: 11, from: { id: 99 }, chat: privateGroup, text: '/status@another_bot' });
+    await telegramTest.handleMessage({ message_id: 12, from: { id: 99 }, chat: privateGroup, text: '/unrelated' });
+    assert.equal(requests.length, requestCount, 'group chatter and commands for other bots must be ignored');
+
+    await telegramTest.handleMessage({ message_id: 13, from: { id: 99 }, chat: privateGroup, text: '/status' });
+    assert.equal(requests.length, requestCount + 1);
+    assert.match(requests.at(-1).text, /未授权/);
+
     publicGroup = true;
     await telegramTest.handleMessage({ from: { id: 99 }, chat: { id: -1001, type: 'group', title: 'Public Group' }, text: '/status' });
     assert.match(requests.at(-1).text, /NetPilot Bot：在线/);

@@ -5,6 +5,7 @@ const api = globalThis.netpilotServerApi;
 const db = api?.db;
 const PAGE_SIZE = 4;
 const REDACTED_IP = 'x.x.x.x';
+const COMMANDS = new Set(['/start', '/help', '/status', '/bind', '/agents', '/iperf', '/nexttrace']);
 const activeTests = new Map();
 const activeTraces = new Map();
 const bindFailures = new Map();
@@ -865,7 +866,11 @@ async function handleMessage(message) {
   const text = String(message.text || '').trim();
   if (!from || !chat || !text) return;
   const parts = text.split(/\s+/);
-  const command = parts[0].split('@')[0].toLowerCase();
+  const commandMatch = parts[0].match(/^(\/[a-z0-9_]+)(?:@([a-z0-9_]+))?$/i);
+  const command = commandMatch?.[1].toLowerCase() || '';
+  const addressedBot = commandMatch?.[2]?.toLowerCase();
+  if (addressedBot && addressedBot !== botUsername().toLowerCase()) return;
+  if (chat.type !== 'private' && (!commandMatch || !COMMANDS.has(command))) return;
   let user = boundUser(from.id);
   const requesterUser = user;
   if (command === '/bind') {

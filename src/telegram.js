@@ -223,7 +223,7 @@ function resultText(view) {
 }
 
 async function sendHelp(chatId) {
-  await safeCall('sendMessage', { chat_id: chatId, text: '/help 查看命令帮助\n/status 查看授权与 Bot 状态\n/bind <网页生成的6位验证码>\n/agents 查看可用 Agent\n/iperf <IP> <端口> [线程] [时长]\n\n在群组中首次使用会自动登记。私有模式仅响应已绑定用户；管理员可在网页将群组设为公共模式。', parse_mode: 'HTML' });
+  await safeCall('sendMessage', { chat_id: chatId, text: '/help 查看命令帮助\n/status 查看授权与 Bot 状态\n/bind <网页生成的6位验证码>\n/agents 查看可用 Agent\n/iperf <IP> [端口] [线程] [时长] [-R]\n\n仅 IP 必填，默认端口 5201、线程 1、时长 10 秒。-R 可放在 IP 前后。\n\n在群组中首次使用会自动登记。私有模式仅响应已绑定用户；管理员可在网页将群组设为公共模式。', parse_mode: 'HTML' });
 }
 
 async function sendStatus(chatId, user, chat) {
@@ -239,24 +239,36 @@ async function sendStatus(chatId, user, chat) {
   });
 }
 
+function parseIperfArgs(args = []) {
+  const tokens = args.map((value) => String(value).trim()).filter(Boolean);
+  if (tokens.some((value) => value.startsWith('-') && value.toUpperCase() !== '-R')) return null;
+  const reverse = tokens.some((value) => value.toUpperCase() === '-R');
+  const positional = tokens.filter((value) => value.toUpperCase() !== '-R');
+  if (positional.length < 1 || positional.length > 4 || positional[0].startsWith('-')) return null;
+  const target = positional[0];
+  const port = positional[1] === undefined ? 5201 : Number(positional[1]);
+  const parallel = positional[2] === undefined ? 1 : Number(positional[2]);
+  const duration = positional[3] === undefined ? 10 : Number(positional[3]);
+  if (!Number.isInteger(port) || port < 1 || port > 65535 || !Number.isInteger(parallel) || parallel < 1 || parallel > 32 || !Number.isInteger(duration) || duration < 1 || duration > 3600) return null;
+  return { target, port, parallel, duration, reverse };
+}
+
 async function startTestFromTelegram(chatId, telegramId, user, args) {
-  const target = args[0];
-  const port = Number(args[1] || 5201);
-  const parallel = Number(args[2] || 1);
-  const duration = Number(args[3] || 10);
-  if (!target || !Number.isInteger(port) || !Number.isInteger(parallel) || !Number.isInteger(duration)) {
-    await safeCall('sendMessage', { chat_id: chatId, text: '格式：/iperf IP 端口 [线程] [时长]' });
+  const parsed = parseIperfArgs(args);
+  if (!parsed) {
+    await safeCall('sendMessage', { chat_id: chatId, text: '格式：/iperf IP [端口] [线程] [时长] [-R]\n示例：/iperf 192.0.2.1 -R' });
     return;
   }
+  const { target, port, parallel, duration, reverse } = parsed;
   const agents = accessibleAgents(user);
   if (!agents.length) {
     await safeCall('sendMessage', { chat_id: chatId, text: '没有可用的在线 Agent。' });
     return;
   }
   const id = makeId();
-  const test = { id, chatId, telegramId, user, publicChatId: user.publicChatId || null, target, port, parallel, duration, agents, selected: new Set(), page: 0 };
+  const test = { id, chatId, telegramId, user, publicChatId: user.publicChatId || null, target, port, parallel, duration, reverse, agents, selected: new Set(), page: 0 };
   activeTests.set(id, test);
-  const message = await safeCall('sendMessage', { chat_id: chatId, text: `请选择 Agent\n目标：${target}:${port}，${parallel} 线程，${duration} 秒`, reply_markup: selectionKeyboard(test) });
+  const message = await safeCall('sendMessage', { chat_id: chatId, text: `请选择 Agent\n目标：${target}:${port}，${parallel} 线程，${duration} 秒${reverse ? '，反向测试 (-R)' : ''}`, reply_markup: selectionKeyboard(test) });
   test.messageId = message?.message_id;
   if (!test.messageId) activeTests.delete(id);
 }
@@ -275,8 +287,9 @@ function processedCount(test) {
 function progressText(test) {
   const processed = processedCount(test);
   const total = test.selectedAgents.length;
+  const taskLabel = `${test.target}:${test.port}${test.reverse ? ' -R' : ''}`;
   if (!test.currentTaskId || !test.currentAgent) {
-    return `🎯 任务提交成功，正在处理……\n任务：${test.target}:${test.port}\n已选项：${total}\n\n等待下一个 Agent……`;
+    return `🎯 任务提交成功，正在处理……\n任务：${taskLabel}\n已选项：${total}\n\n等待下一个 Agent……`;
   }
   const latest = db.get('SELECT second FROM test_metrics WHERE test_id = ? ORDER BY id DESC LIMIT 1', test.currentTaskId);
   const outputCount = Number(db.get('SELECT COUNT(*) AS count FROM test_output WHERE test_id = ?', test.currentTaskId)?.count || 0);
@@ -284,7 +297,7 @@ function progressText(test) {
   const percent = Math.min(99, Math.max(0, (estimatedSecond / test.duration) * 100));
   const filled = Math.min(12, Math.floor((percent / 100) * 12));
   const bar = `${'█'.repeat(filled)}${'░'.repeat(12 - filled)}`;
-  return `🎯 任务提交成功，正在处理……\n任务：${test.target}:${test.port}\n已选项：${total}\n\n📡 后端：${test.currentAgent.name}\n⌛ 连通性测试进行中……\n[${bar}]\n\n当前进度：${percent.toFixed(1)}% [${Math.min(test.duration, Math.floor(estimatedSecond))}/${test.duration}s]\nAgent 进度：${processed + 1}/${total}\n原始输出：${outputCount} 行\n总耗时：${formatDuration(elapsedMs(test.startedAt))}`;
+  return `🎯 任务提交成功，正在处理……\n任务：${taskLabel}\n已选项：${total}\n\n📡 后端：${test.currentAgent.name}\n⌛ 连通性测试进行中……\n[${bar}]\n\n当前进度：${percent.toFixed(1)}% [${Math.min(test.duration, Math.floor(estimatedSecond))}/${test.duration}s]\nAgent 进度：${processed + 1}/${total}\n原始输出：${outputCount} 行\n总耗时：${formatDuration(elapsedMs(test.startedAt))}`;
 }
 
 async function renderProgress(test, force = false) {
@@ -320,7 +333,7 @@ async function startNextAgent(test) {
     test.currentAgent = agent;
     test.currentStartedAt = Date.now();
     try {
-      const task = api.createTest(test.user, { agentId: agent.id, target: test.target, port: test.port, parallel: test.parallel, duration: test.duration, protocol: 'tcp', reverse: true });
+      const task = api.createTest(test.user, { agentId: agent.id, target: test.target, port: test.port, parallel: test.parallel, duration: test.duration, protocol: 'tcp', reverse: test.reverse });
       test.currentTaskId = task.id;
       test.taskIds.add(task.id);
       api.audit(test.user.id, 'test.create.telegram', task.id, { agentId: agent.id, target: test.target, chatId: test.chatId, serialPosition: processedCount(test) + 1 });
@@ -549,7 +562,7 @@ export async function startTelegramBot() {
       { command: 'status', description: '查看授权与 Bot 状态' },
       { command: 'bind', description: '绑定网页账户' },
       { command: 'agents', description: '查看可用 Agent' },
-      { command: 'iperf', description: '发起 iperf3 测试' }
+      { command: 'iperf', description: '发起测试（仅 IP 必填，可选 -R）' }
     ] });
   }
   globalThis.netpilotTelegramReload = async () => {
@@ -566,4 +579,4 @@ export async function startTelegramBot() {
   }
 }
 
-export const telegramTest = { activeTests, callbackQuery, chartSvg, completeTelegramTask, finishTest, handleChatMember, handleMessage, progressKeyboard, selectionKeyboard };
+export const telegramTest = { activeTests, callbackQuery, chartSvg, completeTelegramTask, finishTest, handleChatMember, handleMessage, parseIperfArgs, progressKeyboard, selectionKeyboard };

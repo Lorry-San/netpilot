@@ -49,6 +49,12 @@ test('Telegram picker binds callbacks to requester and rejects other users', asy
     assert.match(svg, />90\.25</);
     assert.match(svg, />1</);
     assert.match(svg, />2</);
+
+    assert.deepEqual(telegramTest.parseIperfArgs(['198.51.100.1']), { target: '198.51.100.1', port: 5201, parallel: 1, duration: 10, reverse: false });
+    assert.deepEqual(telegramTest.parseIperfArgs(['198.51.100.1', '-R']), { target: '198.51.100.1', port: 5201, parallel: 1, duration: 10, reverse: true });
+    assert.deepEqual(telegramTest.parseIperfArgs(['-R', '198.51.100.1']), { target: '198.51.100.1', port: 5201, parallel: 1, duration: 10, reverse: true });
+    assert.deepEqual(telegramTest.parseIperfArgs(['198.51.100.1', '5202', '4', '30', '-R']), { target: '198.51.100.1', port: 5202, parallel: 4, duration: 30, reverse: true });
+    assert.equal(telegramTest.parseIperfArgs(['198.51.100.1', '70000']), null);
   } finally {
     globalThis.netpilotServerApi = originalApi;
     globalThis.fetch = originalFetch;
@@ -98,6 +104,7 @@ test('Telegram multi-Agent tests run serially and upload charts as documents', a
       port: 5201,
       parallel: 1,
       duration: 10,
+      reverse: true,
       agents: [
         { id: 'agent_one', name: 'Agent One', status: 'online' },
         { id: 'agent_two', name: 'Agent Two', status: 'online' }

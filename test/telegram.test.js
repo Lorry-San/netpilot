@@ -50,10 +50,10 @@ test('Telegram picker binds callbacks to requester and rejects other users', asy
     assert.match(svg, />1</);
     assert.match(svg, />2</);
 
-    assert.deepEqual(telegramTest.parseIperfArgs(['198.51.100.1']), { target: '198.51.100.1', port: 5201, parallel: 1, duration: 10, reverse: false });
-    assert.deepEqual(telegramTest.parseIperfArgs(['198.51.100.1', '-R']), { target: '198.51.100.1', port: 5201, parallel: 1, duration: 10, reverse: true });
-    assert.deepEqual(telegramTest.parseIperfArgs(['-R', '198.51.100.1']), { target: '198.51.100.1', port: 5201, parallel: 1, duration: 10, reverse: true });
-    assert.deepEqual(telegramTest.parseIperfArgs(['198.51.100.1', '5202', '4', '30', '-R']), { target: '198.51.100.1', port: 5202, parallel: 4, duration: 30, reverse: true });
+    assert.deepEqual(telegramTest.parseIperfArgs(['198.51.100.1']), { target: '198.51.100.1', port: 5201, parallel: 1, duration: 10, reverse: false, reverseSpecified: false });
+    assert.deepEqual(telegramTest.parseIperfArgs(['198.51.100.1', '-R']), { target: '198.51.100.1', port: 5201, parallel: 1, duration: 10, reverse: true, reverseSpecified: true });
+    assert.deepEqual(telegramTest.parseIperfArgs(['-R', '198.51.100.1']), { target: '198.51.100.1', port: 5201, parallel: 1, duration: 10, reverse: true, reverseSpecified: true });
+    assert.deepEqual(telegramTest.parseIperfArgs(['198.51.100.1', '5202', '4', '30', '-R']), { target: '198.51.100.1', port: 5202, parallel: 4, duration: 30, reverse: true, reverseSpecified: true });
     assert.equal(telegramTest.parseIperfArgs(['198.51.100.1', '70000']), null);
   } finally {
     globalThis.netpilotServerApi = originalApi;
@@ -66,6 +66,7 @@ test('Telegram multi-Agent tests run serially and upload charts as documents', a
   const originalFetch = globalThis.fetch;
   const createdAgents = [];
   const uploads = [];
+  const messages = [];
   let taskNumber = 0;
   globalThis.netpilotServerApi = {
     db: {
@@ -88,6 +89,7 @@ test('Telegram multi-Agent tests run serially and upload charts as documents', a
   };
   globalThis.fetch = async (url, options) => {
     if (options.body instanceof FormData) uploads.push({ url: String(url), body: options.body });
+    else messages.push({ url: String(url), body: JSON.parse(options.body) });
     return { ok: true, status: 200, async json() { return { ok: true, result: { message_id: 9 } }; } };
   };
 
@@ -99,6 +101,7 @@ test('Telegram multi-Agent tests run serially and upload charts as documents', a
       telegramId: 42,
       chatId: 100,
       messageId: 7,
+      replyToMessageId: 321,
       user: { id: 2, role: 'user' },
       target: '192.0.2.1',
       port: 5201,
@@ -136,6 +139,8 @@ test('Telegram multi-Agent tests run serially and upload charts as documents', a
     assert.equal(uploads.length, 1);
     assert.match(uploads[0].url, /\/sendDocument$/);
     assert.ok(uploads[0].body.get('document') instanceof Blob);
+    assert.deepEqual(JSON.parse(uploads[0].body.get('reply_parameters')), { message_id: 321 });
+    assert.deepEqual(messages.find((request) => request.url.endsWith('/sendMessage')).body.reply_parameters, { message_id: 321 });
 
     await telegramTest.completeTelegramTask({ id: 'task_2' }, completedView('Agent Two'));
     assert.equal(telegramTest.activeTests.has(pending.id), false);
@@ -145,6 +150,131 @@ test('Telegram multi-Agent tests run serially and upload charts as documents', a
       for (const pending of telegramTest.activeTests.values()) clearInterval(pending.timer);
       telegramTest.activeTests.clear();
     }
+    globalThis.netpilotServerApi = originalApi;
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('Telegram direction picker starts upload or download only after a direction is chosen', async () => {
+  const originalApi = globalThis.netpilotServerApi;
+  const originalFetch = globalThis.fetch;
+  const requests = [];
+  const created = [];
+  globalThis.netpilotServerApi = {
+    db: {
+      get(sql) {
+        if (sql.includes('FROM telegram_users')) return { id: 2, username: 'user', displayName: 'User', role: 'user', disabled: 0 };
+        if (sql.includes('COUNT(*)')) return { count: 0 };
+        return null;
+      },
+      all() { return []; },
+      run() {},
+      now() { return new Date().toISOString(); }
+    },
+    getSettings() { return { telegram_bot_token: '123456789:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA' }; },
+    createTest(_user, body) {
+      created.push(body);
+      return { id: `task_${created.length}` };
+    },
+    audit() {}
+  };
+  globalThis.fetch = async (url, options) => {
+    requests.push({ url: String(url), body: JSON.parse(options.body) });
+    return { ok: true, status: 200, async json() { return { ok: true, result: true }; } };
+  };
+
+  let telegramTest;
+  try {
+    ({ telegramTest } = await import(`../src/telegram.js?direction=${Date.now()}`));
+    const makePending = (id) => ({
+      id,
+      telegramId: 42,
+      chatId: 100,
+      messageId: 7,
+      user: { id: 2, role: 'user' },
+      target: '192.0.2.1',
+      port: 5201,
+      parallel: 1,
+      duration: 10,
+      reverse: false,
+      directionRequired: true,
+      agents: [{ id: 'agent_one', name: 'Agent One', status: 'online' }],
+      selected: new Set(['agent_one']),
+      page: 0,
+      queryId: `done_${id}`,
+      state: 'selecting'
+    });
+
+    const upload = makePending('tg_upload');
+    telegramTest.activeTests.set(upload.id, upload);
+    await telegramTest.finishTest(upload);
+    assert.equal(upload.state, 'direction');
+    assert.equal(created.length, 0);
+    const directionEdit = requests.find((request) => request.url.endsWith('/editMessageText'));
+    assert.deepEqual(directionEdit.body.reply_markup.inline_keyboard.map((row) => row.map((button) => button.text)), [
+      ['上行测试', '下行测试'],
+      ['关闭页面']
+    ]);
+    await telegramTest.callbackQuery({ id: 'direction-up', from: { id: 42 }, data: 'tg:tg_upload:direction:up:42' });
+    assert.equal(upload.state, 'running');
+    assert.equal(created[0].reverse, false);
+
+    const download = makePending('tg_download');
+    telegramTest.activeTests.set(download.id, download);
+    await telegramTest.finishTest(download);
+    await telegramTest.callbackQuery({ id: 'direction-down', from: { id: 42 }, data: 'tg:tg_download:direction:down:42' });
+    assert.equal(download.state, 'running');
+    assert.equal(created[1].reverse, true);
+
+    const closed = makePending('tg_close');
+    telegramTest.activeTests.set(closed.id, closed);
+    await telegramTest.finishTest(closed);
+    await telegramTest.callbackQuery({ id: 'direction-close', from: { id: 42 }, data: 'tg:tg_close:close:42' });
+    assert.equal(telegramTest.activeTests.has(closed.id), false);
+    assert.ok(requests.some((request) => request.url.endsWith('/deleteMessage')));
+  } finally {
+    if (telegramTest) {
+      for (const pending of telegramTest.activeTests.values()) clearInterval(pending.timer);
+      telegramTest.activeTests.clear();
+    }
+    globalThis.netpilotServerApi = originalApi;
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('Telegram command responses reply to the message that invoked the Bot', async () => {
+  const originalApi = globalThis.netpilotServerApi;
+  const originalFetch = globalThis.fetch;
+  const requests = [];
+  globalThis.netpilotServerApi = {
+    db: {
+      get(sql) {
+        if (sql.includes('FROM telegram_users')) return { id: 2, username: 'user', displayName: 'User', role: 'user', disabled: 0 };
+        if (sql.includes('COUNT(*)')) return { count: 0 };
+        return null;
+      },
+      all() { return [{ id: 'agent_one', name: 'Agent One', status: 'online' }]; },
+      run() {},
+      now() { return new Date().toISOString(); }
+    },
+    getSettings() { return { telegram_bot_token: '123456789:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA' }; }
+  };
+  globalThis.fetch = async (url, options) => {
+    requests.push({ url: String(url), body: JSON.parse(options.body) });
+    return { ok: true, status: 200, async json() { return { ok: true, result: { message_id: 9 } }; } };
+  };
+
+  let telegramTest;
+  try {
+    ({ telegramTest } = await import(`../src/telegram.js?reply=${Date.now()}`));
+    await telegramTest.handleMessage({ message_id: 456, from: { id: 42 }, chat: { id: 100, type: 'private' }, text: '/iperf 192.0.2.1' });
+    const picker = requests.find((request) => request.url.endsWith('/sendMessage'));
+    assert.deepEqual(picker.body.reply_parameters, { message_id: 456 });
+    const pending = [...telegramTest.activeTests.values()][0];
+    assert.equal(pending.replyToMessageId, 456);
+    assert.equal(pending.directionRequired, true);
+  } finally {
+    telegramTest?.activeTests.clear();
     globalThis.netpilotServerApi = originalApi;
     globalThis.fetch = originalFetch;
   }

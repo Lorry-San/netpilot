@@ -35,9 +35,13 @@ async function safeCall(method, body) {
   try { return await call(method, body); } catch (error) { console.error(`[netpilot] telegram ${method}:`, error.message); return null; }
 }
 
+function replyTo(messageId) {
+  return messageId ? { reply_parameters: { message_id: messageId } } : {};
+}
+
 async function upload(method, fields, fileField, filename, bytes, contentType) {
   const form = new FormData();
-  for (const [key, value] of Object.entries(fields)) form.set(key, String(value));
+  for (const [key, value] of Object.entries(fields)) form.set(key, value && typeof value === 'object' ? JSON.stringify(value) : String(value));
   form.set(fileField, new Blob([bytes], { type: contentType }), filename);
   const response = await fetch(telegramUrl(method), { method: 'POST', body: form, signal: AbortSignal.timeout(45000) });
   const result = await response.json().catch(() => ({}));
@@ -124,6 +128,16 @@ function selectionKeyboard(test) {
   return { inline_keyboard: rows };
 }
 
+function directionKeyboard(test) {
+  return { inline_keyboard: [
+    [
+      { text: '上行测试', callback_data: `tg:${test.id}:direction:up:${test.telegramId}` },
+      { text: '下行测试', callback_data: `tg:${test.id}:direction:down:${test.telegramId}` }
+    ],
+    [{ text: '关闭页面', callback_data: `tg:${test.id}:close:${test.telegramId}` }]
+  ] };
+}
+
 function chartSvg(metrics = [], options = {}) {
   const rows = metrics
     .map((metric, index) => ({
@@ -197,14 +211,14 @@ function formatTimestamp(value) {
   return new Intl.DateTimeFormat('zh-CN', { timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false }).format(new Date(value)).replaceAll('/', '-');
 }
 
-async function sendChart(chatId, view, batchStartedAt) {
+async function sendChart(chatId, view, batchStartedAt, replyToMessageId) {
   if (!view.metrics.length) return false;
   const svg = chartSvg(view.metrics, { title: `${view.agentName} - ${view.target}:${view.port}` });
   try {
     const png = new Resvg(svg, { fitTo: { mode: 'width', value: Math.min(2400, Math.max(1440, view.metrics.length * 100)) } }).render().asPng();
     const timestamp = new Date(view.finishedAt || Date.now()).toISOString().replaceAll(':', '-').replace(/\.\d{3}Z$/, 'Z');
     const caption = `速度 / 时间曲线\nAgent：${view.agentName}\n测试耗时：${formatDuration(elapsedMs(view.createdAt, view.finishedAt))}\n当前总耗时：${formatDuration(elapsedMs(batchStartedAt, view.finishedAt || Date.now()))}`;
-    await upload('sendDocument', { chat_id: chatId, caption }, 'document', `netpilot-${timestamp}.png`, png, 'image/png');
+    await upload('sendDocument', { chat_id: chatId, caption, ...replyTo(replyToMessageId) }, 'document', `netpilot-${timestamp}.png`, png, 'image/png');
     return true;
   } catch (error) {
     console.error('[netpilot] telegram chart:', error.message);
@@ -222,11 +236,11 @@ function resultText(view) {
   return `测试${status}\nAgent：${esc(view.agentName)}\n目标：${esc(view.target)}:${view.port}\n协议：${view.protocol.toUpperCase()}${view.reverse ? ' -R' : ''}\n设定时长：${view.duration}s\n测试耗时：${duration}\n完成时间：${formatTimestamp(view.finishedAt)}\n末速：${rate} Mbps\n\n<blockquote expandable>${esc(tail || '无原始输出')}</blockquote>`;
 }
 
-async function sendHelp(chatId) {
-  await safeCall('sendMessage', { chat_id: chatId, text: '/help 查看命令帮助\n/status 查看授权与 Bot 状态\n/bind <网页生成的6位验证码>\n/agents 查看可用 Agent\n/iperf <IP> [端口] [线程] [时长] [-R]\n\n仅 IP 必填，默认端口 5201、线程 1、时长 10 秒。-R 可放在 IP 前后。\n\n在群组中首次使用会自动登记。私有模式仅响应已绑定用户；管理员可在网页将群组设为公共模式。', parse_mode: 'HTML' });
+async function sendHelp(chatId, replyToMessageId) {
+  await safeCall('sendMessage', { chat_id: chatId, text: '/help 查看命令帮助\n/status 查看授权与 Bot 状态\n/bind <网页生成的6位验证码>\n/agents 查看可用 Agent\n/iperf <IP> [端口] [线程] [时长] [-R]\n\n仅 IP 必填，默认端口 5201、线程 1、时长 10 秒。-R 可放在 IP 前后。未指定 -R 时，选完 Agent 后可选择上行或下行测试。\n\n在群组中首次使用会自动登记。私有模式仅响应已绑定用户；管理员可在网页将群组设为公共模式。', parse_mode: 'HTML', ...replyTo(replyToMessageId) });
 }
 
-async function sendStatus(chatId, user, chat) {
+async function sendStatus(chatId, user, chat, replyToMessageId) {
   const agents = accessibleAgents(user);
   const group = chat?.type === 'private' ? null : groupFor(chat.id);
   const groupMode = group ? (group.mode === 'all_members' ? '公共模式' : '私有模式') : '私信';
@@ -235,14 +249,16 @@ async function sendStatus(chatId, user, chat) {
     : Number(db.get('SELECT COUNT(*) AS count FROM telegram_groups WHERE owner_user_id = ?', user.id)?.count || 0);
   await safeCall('sendMessage', {
     chat_id: chatId,
-    text: `NetPilot Bot：在线\n授权账户：${user.displayName || user.username}（UID ${user.id}）\n会话模式：${groupMode}\n可用在线 Agent：${agents.length}\n已登记群组：${groupCount}`
+    text: `NetPilot Bot：在线\n授权账户：${user.displayName || user.username}（UID ${user.id}）\n会话模式：${groupMode}\n可用在线 Agent：${agents.length}\n已登记群组：${groupCount}`,
+    ...replyTo(replyToMessageId)
   });
 }
 
 function parseIperfArgs(args = []) {
   const tokens = args.map((value) => String(value).trim()).filter(Boolean);
   if (tokens.some((value) => value.startsWith('-') && value.toUpperCase() !== '-R')) return null;
-  const reverse = tokens.some((value) => value.toUpperCase() === '-R');
+  const reverseSpecified = tokens.some((value) => value.toUpperCase() === '-R');
+  const reverse = reverseSpecified;
   const positional = tokens.filter((value) => value.toUpperCase() !== '-R');
   if (positional.length < 1 || positional.length > 4 || positional[0].startsWith('-')) return null;
   const target = positional[0];
@@ -250,25 +266,34 @@ function parseIperfArgs(args = []) {
   const parallel = positional[2] === undefined ? 1 : Number(positional[2]);
   const duration = positional[3] === undefined ? 10 : Number(positional[3]);
   if (!Number.isInteger(port) || port < 1 || port > 65535 || !Number.isInteger(parallel) || parallel < 1 || parallel > 32 || !Number.isInteger(duration) || duration < 1 || duration > 3600) return null;
-  return { target, port, parallel, duration, reverse };
+  return { target, port, parallel, duration, reverse, reverseSpecified };
 }
 
-async function startTestFromTelegram(chatId, telegramId, user, args) {
+async function startTestFromTelegram(chatId, telegramId, user, args, replyToMessageId) {
   const parsed = parseIperfArgs(args);
   if (!parsed) {
-    await safeCall('sendMessage', { chat_id: chatId, text: '格式：/iperf IP [端口] [线程] [时长] [-R]\n示例：/iperf 192.0.2.1 -R' });
+    await safeCall('sendMessage', { chat_id: chatId, text: '格式：/iperf IP [端口] [线程] [时长] [-R]\n示例：/iperf 192.0.2.1 -R', ...replyTo(replyToMessageId) });
     return;
   }
-  const { target, port, parallel, duration, reverse } = parsed;
+  const { target, port, parallel, duration, reverse, reverseSpecified } = parsed;
   const agents = accessibleAgents(user);
   if (!agents.length) {
-    await safeCall('sendMessage', { chat_id: chatId, text: '没有可用的在线 Agent。' });
+    await safeCall('sendMessage', { chat_id: chatId, text: '没有可用的在线 Agent。', ...replyTo(replyToMessageId) });
     return;
   }
   const id = makeId();
-  const test = { id, chatId, telegramId, user, publicChatId: user.publicChatId || null, target, port, parallel, duration, reverse, agents, selected: new Set(), page: 0 };
+  const test = {
+    id, chatId, telegramId, user, publicChatId: user.publicChatId || null,
+    target, port, parallel, duration, reverse, directionRequired: !reverseSpecified,
+    replyToMessageId, agents, selected: new Set(), page: 0, state: 'selecting'
+  };
   activeTests.set(id, test);
-  const message = await safeCall('sendMessage', { chat_id: chatId, text: `请选择 Agent\n目标：${target}:${port}，${parallel} 线程，${duration} 秒${reverse ? '，反向测试 (-R)' : ''}`, reply_markup: selectionKeyboard(test) });
+  const message = await safeCall('sendMessage', {
+    chat_id: chatId,
+    text: `请选择 Agent\n目标：${target}:${port}，${parallel} 线程，${duration} 秒${reverse ? '，反向测试 (-R)' : ''}`,
+    reply_markup: selectionKeyboard(test),
+    ...replyTo(replyToMessageId)
+  });
   test.messageId = message?.message_id;
   if (!test.messageId) activeTests.delete(id);
 }
@@ -348,16 +373,11 @@ async function startNextAgent(test) {
   await finalizeBatch(test);
 }
 
-async function finishTest(test) {
+async function beginSelectedTest(test) {
   if (test.state === 'running') {
     await safeCall('answerCallbackQuery', { callback_query_id: test.queryId, text: '任务已经开始' });
     return;
   }
-  if (!test.selected.size) {
-    await safeCall('answerCallbackQuery', { callback_query_id: test.queryId, text: '请至少选择一个 Agent', show_alert: true });
-    return;
-  }
-  test.selectedAgents = test.agents.filter((agent) => test.selected.has(agent.id));
   test.pendingAgents = [...test.selectedAgents];
   test.taskIds = new Set();
   test.results = [];
@@ -375,13 +395,37 @@ async function finishTest(test) {
   await startNextAgent(test);
 }
 
+async function finishTest(test) {
+  if (test.state === 'running') {
+    await safeCall('answerCallbackQuery', { callback_query_id: test.queryId, text: '任务已经开始' });
+    return;
+  }
+  if (!test.selected.size) {
+    await safeCall('answerCallbackQuery', { callback_query_id: test.queryId, text: '请至少选择一个 Agent', show_alert: true });
+    return;
+  }
+  test.selectedAgents = test.agents.filter((agent) => test.selected.has(agent.id));
+  if (test.directionRequired) {
+    test.state = 'direction';
+    await safeCall('answerCallbackQuery', { callback_query_id: test.queryId, text: `已选择 ${test.selectedAgents.length} 个 Agent` });
+    await safeCall('editMessageText', {
+      chat_id: test.chatId,
+      message_id: test.messageId,
+      text: `请选择测试方向\n目标：${test.target}:${test.port}，${test.parallel} 线程，${test.duration} 秒\nAgent：${test.selectedAgents.map((agent) => agent.name).join('、')}`,
+      reply_markup: directionKeyboard(test)
+    });
+    return;
+  }
+  await beginSelectedTest(test);
+}
+
 async function completeTelegramTask(task, view) {
   const test = [...activeTests.values()].find((item) => item.currentTaskId === task.id);
   if (!test) return;
   const itemElapsed = elapsedMs(view.createdAt, view.finishedAt);
   test.results.push({ agent: test.currentAgent, status: view.status, elapsed: itemElapsed });
-  await safeCall('sendMessage', { chat_id: test.chatId, text: resultText(view), parse_mode: 'HTML' });
-  await sendChart(test.chatId, view, test.startedAt);
+  await safeCall('sendMessage', { chat_id: test.chatId, text: resultText(view), parse_mode: 'HTML', ...replyTo(test.replyToMessageId) });
+  await sendChart(test.chatId, view, test.startedAt, test.replyToMessageId);
   test.currentTaskId = null;
   test.currentAgent = null;
   if (test.stopRequested) return finalizeBatch(test);
@@ -402,8 +446,15 @@ async function callbackQuery(query) {
   }
   test.queryId = query.id;
   const action = data[2];
-  if (test.state === 'running' && !['refresh', 'stop'].includes(action)) {
-    await safeCall('answerCallbackQuery', { callback_query_id: query.id, text: '测速正在进行中', show_alert: true });
+  const state = test.state || 'selecting';
+  const allowedActions = {
+    selecting: new Set(['toggle', 'page', 'noop', 'done', 'cancel']),
+    direction: new Set(['direction', 'close']),
+    running: new Set(['refresh', 'stop'])
+  };
+  if (!allowedActions[state]?.has(action)) {
+    const text = state === 'running' ? '测速正在进行中' : state === 'direction' ? '请先选择测试方向' : '当前操作不可用';
+    await safeCall('answerCallbackQuery', { callback_query_id: query.id, text, show_alert: true });
     return;
   }
   if (action === 'toggle') {
@@ -417,6 +468,19 @@ async function callbackQuery(query) {
     await safeCall('editMessageReplyMarkup', { chat_id: test.chatId, message_id: test.messageId, reply_markup: selectionKeyboard(test) });
   } else if (action === 'done') {
     await finishTest(test);
+  } else if (action === 'direction') {
+    const direction = data[3];
+    if (!['up', 'down'].includes(direction)) {
+      await safeCall('answerCallbackQuery', { callback_query_id: query.id, text: '无效的测试方向', show_alert: true });
+      return;
+    }
+    test.reverse = direction === 'down';
+    test.directionRequired = false;
+    await beginSelectedTest(test);
+  } else if (action === 'close') {
+    activeTests.delete(test.id);
+    await safeCall('answerCallbackQuery', { callback_query_id: query.id, text: '已关闭' });
+    await safeCall('deleteMessage', { chat_id: test.chatId, message_id: test.messageId });
   } else if (action === 'refresh') {
     await safeCall('answerCallbackQuery', { callback_query_id: query.id, text: '状态已刷新' });
     await renderProgress(test, true);
@@ -460,7 +524,7 @@ async function handleMessage(message) {
   if (command === '/bind') {
     const failure = bindFailures.get(from.id);
     if (failure && failure.blockedUntil > Date.now()) {
-      await safeCall('sendMessage', { chat_id: chat.id, text: '绑定尝试过多，请稍后再试。' });
+      await safeCall('sendMessage', { chat_id: chat.id, text: '绑定尝试过多，请稍后再试。', ...replyTo(message.message_id) });
       return;
     }
     const code = parts[1] || '';
@@ -469,38 +533,38 @@ async function handleMessage(message) {
     if (!row) {
       const attempts = (failure?.attempts || 0) + 1;
       bindFailures.set(from.id, { attempts: attempts >= 5 ? 0 : attempts, blockedUntil: attempts >= 5 ? Date.now() + 10 * 60 * 1000 : 0 });
-      await safeCall('sendMessage', { chat_id: chat.id, text: '验证码无效或已过期。' });
+      await safeCall('sendMessage', { chat_id: chat.id, text: '验证码无效或已过期。', ...replyTo(message.message_id) });
       return;
     }
     db.run('DELETE FROM telegram_users WHERE user_id = ? OR telegram_id = ?', row.user_id, from.id);
     db.run('INSERT INTO telegram_users (telegram_id, user_id, telegram_username, chat_id, bound_at) VALUES (?, ?, ?, ?, ?)', from.id, row.user_id, from.username || '', chat.id, db.now());
     db.run('DELETE FROM telegram_bind_codes WHERE code = ?', code);
     bindFailures.delete(from.id);
-    await safeCall('sendMessage', { chat_id: chat.id, text: '绑定成功，现在可以使用 /agents 和 /iperf。' });
+    await safeCall('sendMessage', { chat_id: chat.id, text: '绑定成功，现在可以使用 /agents 和 /iperf。', ...replyTo(message.message_id) });
     return;
   }
   if (!user && chat.type === 'private') {
-    await safeCall('sendMessage', { chat_id: chat.id, text: '未授权：请先登录网页端，在 Telegram 页面生成绑定码，然后发送 /bind 验证码。' });
+    await safeCall('sendMessage', { chat_id: chat.id, text: '未授权：请先登录网页端，在 Telegram 页面生成绑定码，然后发送 /bind 验证码。', ...replyTo(message.message_id) });
     return;
   }
   user = user || publicGroupUser(chat);
   if (user && !requesterUser && chat.type !== 'private') user = { ...user, publicChatId: chat.id };
   if (!user) {
-    await safeCall('sendMessage', { chat_id: chat.id, text: '未授权：请先在网页端绑定 Telegram。私有群组只响应已绑定用户。' });
+    await safeCall('sendMessage', { chat_id: chat.id, text: '未授权：请先在网页端绑定 Telegram。私有群组只响应已绑定用户。', ...replyTo(message.message_id) });
     return;
   }
   if (!canUseChat(message, user)) {
-    await safeCall('sendMessage', { chat_id: chat.id, text: '此群组当前不可用，或普通用户已登记过其他群组。' });
+    await safeCall('sendMessage', { chat_id: chat.id, text: '此群组当前不可用，或普通用户已登记过其他群组。', ...replyTo(message.message_id) });
     return;
   }
-  if (command === '/start' || command === '/help') return sendHelp(chat.id);
-  if (command === '/status') return sendStatus(chat.id, user, chat);
+  if (command === '/start' || command === '/help') return sendHelp(chat.id, message.message_id);
+  if (command === '/status') return sendStatus(chat.id, user, chat, message.message_id);
   if (command === '/agents') {
     const agents = accessibleAgents(user);
-    await safeCall('sendMessage', { chat_id: chat.id, text: agents.length ? agents.map((a) => `${a.name} - ${a.status}`).join('\n') : '没有可用的在线 Agent。' });
+    await safeCall('sendMessage', { chat_id: chat.id, text: agents.length ? agents.map((a) => `${a.name} - ${a.status}`).join('\n') : '没有可用的在线 Agent。', ...replyTo(message.message_id) });
     return;
   }
-  if (command === '/iperf') return startTestFromTelegram(chat.id, from.id, user, parts.slice(1));
+  if (command === '/iperf') return startTestFromTelegram(chat.id, from.id, user, parts.slice(1), message.message_id);
 }
 
 async function handleChatMember(update) {
@@ -579,4 +643,4 @@ export async function startTelegramBot() {
   }
 }
 
-export const telegramTest = { activeTests, callbackQuery, chartSvg, completeTelegramTask, finishTest, handleChatMember, handleMessage, parseIperfArgs, progressKeyboard, selectionKeyboard };
+export const telegramTest = { activeTests, beginSelectedTest, callbackQuery, chartSvg, completeTelegramTask, directionKeyboard, finishTest, handleChatMember, handleMessage, parseIperfArgs, progressKeyboard, selectionKeyboard };

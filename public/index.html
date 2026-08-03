@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>NetPilot</title>
-  <link rel="stylesheet" href="/styles.css?v=0.1.16">
+  <link rel="stylesheet" href="/styles.css?v=0.1.17">
 </head>
 <body>
   <main id="login-view" class="login-shell">
@@ -104,7 +104,8 @@
               <div><code>/help</code><span>查看命令帮助</span></div>
               <div><code>/status</code><span>查看授权、会话模式和 Agent 状态</span></div>
               <div><code>/agents</code><span>查看当前账户可用的在线 Agent</span></div>
-              <div><code>/iperf IP [端口] [线程] [时长] [-R]</code><span>仅 IP 必填；未写 -R 时选完 Agent 再选择上/下行，显式 -R 直接下行</span></div>
+              <div><code>/iperf</code><span>选择 Agent 和上/下行，再到 Bot 私聊输入 IP:端口</span></div>
+              <div><code>/iperf IP [端口] [线程] [时长] [-R]</code><span>快捷测速默认上行；显式 -R 为下行</span></div>
             </div>
           </section>
         </div>
@@ -247,6 +248,6 @@
   </dialog>
 
   <div id="toast" role="status" aria-live="polite"></div>
-  <script type="module" src="/app.js?v=0.1.16"></script>
+  <script type="module" src="/app.js?v=0.1.17"></script>
 </body>
 </html>

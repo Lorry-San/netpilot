@@ -15,6 +15,10 @@ function token() {
   return String(api?.getSettings?.()?.telegram_bot_token || '');
 }
 
+function botUsername() {
+  return String(api?.getSettings?.()?.telegram_bot_username || '').replace(/^@/, '');
+}
+
 function telegramUrl(method) {
   return `https://api.telegram.org/bot${token()}/${method}`;
 }
@@ -129,11 +133,24 @@ function selectionKeyboard(test) {
 }
 
 function directionKeyboard(test) {
+  const username = botUsername();
+  const directionButton = (text, direction) => test.chatType !== 'private' && username
+    ? { text, url: `https://t.me/${username}?start=iperf_${test.id}_${direction}` }
+    : { text, callback_data: `tg:${test.id}:direction:${direction}:${test.telegramId}` };
   return { inline_keyboard: [
     [
-      { text: '上行测试', callback_data: `tg:${test.id}:direction:up:${test.telegramId}` },
-      { text: '下行测试', callback_data: `tg:${test.id}:direction:down:${test.telegramId}` }
+      directionButton('上行测试', 'up'),
+      directionButton('下行测试', 'down')
     ],
+    [{ text: '关闭页面', callback_data: `tg:${test.id}:close:${test.telegramId}` }]
+  ] };
+}
+
+function privateTargetKeyboard(test) {
+  const username = botUsername();
+  if (!username) return { inline_keyboard: [[{ text: '关闭页面', callback_data: `tg:${test.id}:close:${test.telegramId}` }]] };
+  return { inline_keyboard: [
+    [{ text: '前往私聊输入 IP:端口', url: `https://t.me/${username}?start=iperf_${test.id}` }],
     [{ text: '关闭页面', callback_data: `tg:${test.id}:close:${test.telegramId}` }]
   ] };
 }
@@ -237,7 +254,7 @@ function resultText(view) {
 }
 
 async function sendHelp(chatId, replyToMessageId) {
-  await safeCall('sendMessage', { chat_id: chatId, text: '/help 查看命令帮助\n/status 查看授权与 Bot 状态\n/bind <网页生成的6位验证码>\n/agents 查看可用 Agent\n/iperf <IP> [端口] [线程] [时长] [-R]\n\n仅 IP 必填，默认端口 5201、线程 1、时长 10 秒。-R 可放在 IP 前后。未指定 -R 时，选完 Agent 后可选择上行或下行测试。\n\n在群组中首次使用会自动登记。私有模式仅响应已绑定用户；管理员可在网页将群组设为公共模式。', parse_mode: 'HTML', ...replyTo(replyToMessageId) });
+  await safeCall('sendMessage', { chat_id: chatId, text: '/help 查看命令帮助\n/status 查看授权与 Bot 状态\n/bind <网页生成的6位验证码>\n/agents 查看可用 Agent\n/iperf 交互设置 Agent、方向和目标\n/iperf <IP> [端口] [线程] [时长] [-R] 快捷测速\n\n直接输入 /iperf 时，先选择 Agent 和上/下行，再在 Bot 私聊输入 IP:端口。/iperf IP 默认上行；显式 -R 为下行。快捷模式默认端口 5201、线程 1、时长 10 秒。\n\n在群组中首次使用会自动登记。私有模式仅响应已绑定用户；管理员可在网页将群组设为公共模式。', parse_mode: 'HTML', ...replyTo(replyToMessageId) });
 }
 
 async function sendStatus(chatId, user, chat, replyToMessageId) {
@@ -269,33 +286,89 @@ function parseIperfArgs(args = []) {
   return { target, port, parallel, duration, reverse, reverseSpecified };
 }
 
-async function startTestFromTelegram(chatId, telegramId, user, args, replyToMessageId) {
-  const parsed = parseIperfArgs(args);
+function parseTargetInput(value) {
+  const input = String(value || '').trim();
+  if (!input || /\s/.test(input) || input.length > 255) return null;
+  let target = input;
+  let port = 5201;
+  const bracketed = input.match(/^\[([^\]]+)](?::(\d+))?$/);
+  if (bracketed) {
+    target = bracketed[1];
+    port = bracketed[2] === undefined ? 5201 : Number(bracketed[2]);
+  } else if ((input.match(/:/g) || []).length === 1) {
+    const separator = input.lastIndexOf(':');
+    target = input.slice(0, separator);
+    port = Number(input.slice(separator + 1));
+  }
+  if (!target || !Number.isInteger(port) || port < 1 || port > 65535) return null;
+  return { target, port };
+}
+
+async function startTestFromTelegram(chat, telegramId, user, args, replyToMessageId) {
+  const interactive = args.length === 0;
+  const parsed = interactive
+    ? { target: '', port: 5201, parallel: 1, duration: 10, reverse: false, reverseSpecified: false }
+    : parseIperfArgs(args);
   if (!parsed) {
-    await safeCall('sendMessage', { chat_id: chatId, text: '格式：/iperf IP [端口] [线程] [时长] [-R]\n示例：/iperf 192.0.2.1 -R', ...replyTo(replyToMessageId) });
+    await safeCall('sendMessage', { chat_id: chat.id, text: '格式：/iperf 或 /iperf IP [端口] [线程] [时长] [-R]\n示例：/iperf 192.0.2.1', ...replyTo(replyToMessageId) });
     return;
   }
-  const { target, port, parallel, duration, reverse, reverseSpecified } = parsed;
+  const { target, port, parallel, duration, reverse } = parsed;
   const agents = accessibleAgents(user);
   if (!agents.length) {
-    await safeCall('sendMessage', { chat_id: chatId, text: '没有可用的在线 Agent。', ...replyTo(replyToMessageId) });
+    await safeCall('sendMessage', { chat_id: chat.id, text: '没有可用的在线 Agent。', ...replyTo(replyToMessageId) });
     return;
   }
   const id = makeId();
   const test = {
-    id, chatId, telegramId, user, publicChatId: user.publicChatId || null,
-    target, port, parallel, duration, reverse, directionRequired: !reverseSpecified,
-    replyToMessageId, agents, selected: new Set(), page: 0, state: 'selecting'
+    id, chatId: chat.id, chatType: chat.type, telegramId, user, publicChatId: user.publicChatId || null,
+    target, port, parallel, duration, reverse, directionRequired: interactive, targetRequired: interactive,
+    replyToMessageId, agents, selected: new Set(), page: 0, state: 'selecting', createdAt: Date.now()
   };
   activeTests.set(id, test);
   const message = await safeCall('sendMessage', {
-    chat_id: chatId,
-    text: `请选择 Agent\n目标：${target}:${port}，${parallel} 线程，${duration} 秒${reverse ? '，反向测试 (-R)' : ''}`,
+    chat_id: chat.id,
+    text: interactive
+      ? '请选择 Agent\n选择完成后继续设置上行或下行测试。'
+      : `请选择 Agent\n目标：${target}:${port}，${parallel} 线程，${duration} 秒${reverse ? '，下行测试 (-R)' : '，上行测试'}`,
     reply_markup: selectionKeyboard(test),
     ...replyTo(replyToMessageId)
   });
   test.messageId = message?.message_id;
   if (!test.messageId) activeTests.delete(id);
+}
+
+async function promptForTarget(test, privateChatId, replyToMessageId) {
+  test.state = 'awaiting_target';
+  test.inputChatId = privateChatId;
+  test.inputReplyToMessageId = replyToMessageId;
+  test.promptedAt = Date.now();
+  const message = await safeCall('sendMessage', {
+    chat_id: privateChatId,
+    text: `请输入目标 IP:端口\n端口不填写时默认为 5201。\n测试方向：${test.reverse ? '下行' : '上行'}`,
+    reply_markup: { force_reply: true, selective: true, input_field_placeholder: 'IP:5201' },
+    ...replyTo(replyToMessageId)
+  });
+  test.inputPromptMessageId = message?.message_id;
+}
+
+async function requestTarget(test, privateChatId, replyToMessageId) {
+  if (test.chatType === 'private') {
+    await safeCall('editMessageText', {
+      chat_id: test.chatId,
+      message_id: test.messageId,
+      text: `Agent 与方向已设置，等待输入目标 IP:端口。\nAgent：${test.selectedAgents.map((agent) => agent.name).join('、')}\n方向：${test.reverse ? '下行' : '上行'}`
+    });
+    await promptForTarget(test, privateChatId, replyToMessageId);
+    return;
+  }
+  test.state = 'awaiting_private';
+  await safeCall('editMessageText', {
+    chat_id: test.chatId,
+    message_id: test.messageId,
+    text: `Agent 与方向已设置\nAgent：${test.selectedAgents.map((agent) => agent.name).join('、')}\n方向：${test.reverse ? '下行' : '上行'}\n请前往 Bot 私聊输入目标 IP:端口。`,
+    reply_markup: privateTargetKeyboard(test)
+  });
 }
 
 function progressKeyboard(test) {
@@ -375,7 +448,7 @@ async function startNextAgent(test) {
 
 async function beginSelectedTest(test) {
   if (test.state === 'running') {
-    await safeCall('answerCallbackQuery', { callback_query_id: test.queryId, text: '任务已经开始' });
+    if (test.queryId) await safeCall('answerCallbackQuery', { callback_query_id: test.queryId, text: '任务已经开始' });
     return;
   }
   test.pendingAgents = [...test.selectedAgents];
@@ -387,7 +460,10 @@ async function beginSelectedTest(test) {
   test.startedAt = Date.now();
   test.stopRequested = false;
   test.state = 'running';
-  await safeCall('answerCallbackQuery', { callback_query_id: test.queryId, text: `已加入 ${test.selectedAgents.length} 个 Agent，将依次测速` });
+  if (test.queryId) {
+    await safeCall('answerCallbackQuery', { callback_query_id: test.queryId, text: `已加入 ${test.selectedAgents.length} 个 Agent，将依次测速` });
+    test.queryId = null;
+  }
   await renderProgress(test, true);
   const timer = setInterval(() => renderProgress(test), 2000);
   timer.unref?.();
@@ -408,10 +484,11 @@ async function finishTest(test) {
   if (test.directionRequired) {
     test.state = 'direction';
     await safeCall('answerCallbackQuery', { callback_query_id: test.queryId, text: `已选择 ${test.selectedAgents.length} 个 Agent` });
+    test.queryId = null;
     await safeCall('editMessageText', {
       chat_id: test.chatId,
       message_id: test.messageId,
-      text: `请选择测试方向\n目标：${test.target}:${test.port}，${test.parallel} 线程，${test.duration} 秒\nAgent：${test.selectedAgents.map((agent) => agent.name).join('、')}`,
+      text: `请选择测试方向\nAgent：${test.selectedAgents.map((agent) => agent.name).join('、')}`,
       reply_markup: directionKeyboard(test)
     });
     return;
@@ -450,6 +527,7 @@ async function callbackQuery(query) {
   const allowedActions = {
     selecting: new Set(['toggle', 'page', 'noop', 'done', 'cancel']),
     direction: new Set(['direction', 'close']),
+    awaiting_private: new Set(['close']),
     running: new Set(['refresh', 'stop'])
   };
   if (!allowedActions[state]?.has(action)) {
@@ -476,7 +554,13 @@ async function callbackQuery(query) {
     }
     test.reverse = direction === 'down';
     test.directionRequired = false;
-    await beginSelectedTest(test);
+    if (test.targetRequired) {
+      await safeCall('answerCallbackQuery', { callback_query_id: query.id, text: `已选择${test.reverse ? '下行' : '上行'}测试` });
+      test.queryId = null;
+      await requestTarget(test, test.chatId, test.replyToMessageId);
+    } else {
+      await beginSelectedTest(test);
+    }
   } else if (action === 'close') {
     activeTests.delete(test.id);
     await safeCall('answerCallbackQuery', { callback_query_id: query.id, text: '已关闭' });
@@ -512,6 +596,56 @@ async function callbackQuery(query) {
   }
 }
 
+function authorizedForPending(test, telegramId, user) {
+  if (test.telegramId !== Number(telegramId)) return false;
+  if (user?.id === test.user.id) return true;
+  const group = test.publicChatId ? groupFor(test.publicChatId) : null;
+  return group?.mode === 'all_members' && group.owner_user_id === test.user.id;
+}
+
+async function resumeTargetInPrivate(message, user, payload) {
+  const value = String(payload || '');
+  const directionMatch = value.match(/^iperf_(.+)_(up|down)$/);
+  const id = directionMatch ? directionMatch[1] : value.replace(/^iperf_/, '');
+  const test = activeTests.get(id);
+  const expectedState = directionMatch ? 'direction' : 'awaiting_private';
+  if (!test || test.state !== expectedState || !authorizedForPending(test, message.from.id, user)) return false;
+  if (directionMatch) {
+    test.reverse = directionMatch[2] === 'down';
+    test.directionRequired = false;
+  }
+  await safeCall('editMessageText', {
+    chat_id: test.chatId,
+    message_id: test.messageId,
+    text: `已转到私聊，等待目标 IP:端口。\nAgent：${test.selectedAgents.map((agent) => agent.name).join('、')}\n方向：${test.reverse ? '下行' : '上行'}`
+  });
+  await promptForTarget(test, message.chat.id, message.message_id);
+  return true;
+}
+
+async function acceptTargetInput(message, user) {
+  const replyMessageId = message.reply_to_message?.message_id;
+  const candidates = [...activeTests.values()]
+    .filter((test) => test.state === 'awaiting_target' && test.inputChatId === message.chat.id && authorizedForPending(test, message.from.id, user))
+    .sort((a, b) => {
+      const aReply = a.inputPromptMessageId === replyMessageId ? 1 : 0;
+      const bReply = b.inputPromptMessageId === replyMessageId ? 1 : 0;
+      return bReply - aReply || Number(b.promptedAt || 0) - Number(a.promptedAt || 0);
+    });
+  const test = candidates[0];
+  if (!test) return false;
+  const parsed = parseTargetInput(message.text);
+  if (!parsed) {
+    await promptForTarget(test, message.chat.id, test.inputReplyToMessageId);
+    return true;
+  }
+  test.target = parsed.target;
+  test.port = parsed.port;
+  test.targetRequired = false;
+  await beginSelectedTest(test);
+  return true;
+}
+
 async function handleMessage(message) {
   const from = message.from;
   const chat = message.chat;
@@ -543,6 +677,10 @@ async function handleMessage(message) {
     await safeCall('sendMessage', { chat_id: chat.id, text: '绑定成功，现在可以使用 /agents 和 /iperf。', ...replyTo(message.message_id) });
     return;
   }
+  if (command === '/start' && parts[1]?.startsWith('iperf_') && chat.type === 'private') {
+    if (await resumeTargetInPrivate(message, user, parts[1])) return;
+  }
+  if (!text.startsWith('/') && await acceptTargetInput(message, user)) return;
   if (!user && chat.type === 'private') {
     await safeCall('sendMessage', { chat_id: chat.id, text: '未授权：请先登录网页端，在 Telegram 页面生成绑定码，然后发送 /bind 验证码。', ...replyTo(message.message_id) });
     return;
@@ -564,7 +702,7 @@ async function handleMessage(message) {
     await safeCall('sendMessage', { chat_id: chat.id, text: agents.length ? agents.map((a) => `${a.name} - ${a.status}`).join('\n') : '没有可用的在线 Agent。', ...replyTo(message.message_id) });
     return;
   }
-  if (command === '/iperf') return startTestFromTelegram(chat.id, from.id, user, parts.slice(1), message.message_id);
+  if (command === '/iperf') return startTestFromTelegram(chat, from.id, user, parts.slice(1), message.message_id);
 }
 
 async function handleChatMember(update) {
@@ -626,7 +764,7 @@ export async function startTelegramBot() {
       { command: 'status', description: '查看授权与 Bot 状态' },
       { command: 'bind', description: '绑定网页账户' },
       { command: 'agents', description: '查看可用 Agent' },
-      { command: 'iperf', description: '发起测试（仅 IP 必填，可选 -R）' }
+      { command: 'iperf', description: '交互测速，或附带 IP 快捷上行' }
     ] });
   }
   globalThis.netpilotTelegramReload = async () => {
@@ -643,4 +781,4 @@ export async function startTelegramBot() {
   }
 }
 
-export const telegramTest = { activeTests, beginSelectedTest, callbackQuery, chartSvg, completeTelegramTask, directionKeyboard, finishTest, handleChatMember, handleMessage, parseIperfArgs, progressKeyboard, selectionKeyboard };
+export const telegramTest = { activeTests, beginSelectedTest, callbackQuery, chartSvg, completeTelegramTask, directionKeyboard, finishTest, handleChatMember, handleMessage, parseIperfArgs, parseTargetInput, privateTargetKeyboard, progressKeyboard, selectionKeyboard };

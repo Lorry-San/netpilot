@@ -55,6 +55,10 @@ test('Telegram picker binds callbacks to requester and rejects other users', asy
     assert.deepEqual(telegramTest.parseIperfArgs(['-R', '198.51.100.1']), { target: '198.51.100.1', port: 5201, parallel: 1, duration: 10, reverse: true, reverseSpecified: true });
     assert.deepEqual(telegramTest.parseIperfArgs(['198.51.100.1', '5202', '4', '30', '-R']), { target: '198.51.100.1', port: 5202, parallel: 4, duration: 30, reverse: true, reverseSpecified: true });
     assert.equal(telegramTest.parseIperfArgs(['198.51.100.1', '70000']), null);
+    assert.deepEqual(telegramTest.parseTargetInput('198.51.100.1'), { target: '198.51.100.1', port: 5201 });
+    assert.deepEqual(telegramTest.parseTargetInput('198.51.100.1:5202'), { target: '198.51.100.1', port: 5202 });
+    assert.deepEqual(telegramTest.parseTargetInput('[2001:db8::1]:5203'), { target: '2001:db8::1', port: 5203 });
+    assert.equal(telegramTest.parseTargetInput('198.51.100.1:70000'), null);
   } finally {
     globalThis.netpilotServerApi = originalApi;
     globalThis.fetch = originalFetch;
@@ -155,7 +159,7 @@ test('Telegram multi-Agent tests run serially and upload charts as documents', a
   }
 });
 
-test('Telegram direction picker starts upload or download only after a direction is chosen', async () => {
+test('Telegram interactive mode chooses direction before accepting the target in private chat', async () => {
   const originalApi = globalThis.netpilotServerApi;
   const originalFetch = globalThis.fetch;
   const requests = [];
@@ -171,7 +175,7 @@ test('Telegram direction picker starts upload or download only after a direction
       run() {},
       now() { return new Date().toISOString(); }
     },
-    getSettings() { return { telegram_bot_token: '123456789:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA' }; },
+    getSettings() { return { telegram_bot_token: '123456789:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA', telegram_bot_username: 'netpilot_test_bot' }; },
     createTest(_user, body) {
       created.push(body);
       return { id: `task_${created.length}` };
@@ -190,14 +194,17 @@ test('Telegram direction picker starts upload or download only after a direction
       id,
       telegramId: 42,
       chatId: 100,
+      chatType: 'private',
       messageId: 7,
+      replyToMessageId: 55,
       user: { id: 2, role: 'user' },
-      target: '192.0.2.1',
+      target: '',
       port: 5201,
       parallel: 1,
       duration: 10,
       reverse: false,
       directionRequired: true,
+      targetRequired: true,
       agents: [{ id: 'agent_one', name: 'Agent One', status: 'online' }],
       selected: new Set(['agent_one']),
       page: 0,
@@ -216,15 +223,34 @@ test('Telegram direction picker starts upload or download only after a direction
       ['关闭页面']
     ]);
     await telegramTest.callbackQuery({ id: 'direction-up', from: { id: 42 }, data: 'tg:tg_upload:direction:up:42' });
+    assert.equal(upload.state, 'awaiting_target');
+    assert.equal(created.length, 0);
+    const targetPrompt = requests.find((request) => request.url.endsWith('/sendMessage'));
+    assert.equal(targetPrompt.body.reply_markup.force_reply, true);
+    assert.deepEqual(targetPrompt.body.reply_parameters, { message_id: 55 });
+    await telegramTest.handleMessage({ message_id: 56, reply_to_message: { message_id: targetPrompt.body.message_id }, from: { id: 42 }, chat: { id: 100, type: 'private' }, text: '192.0.2.10:5202' });
     assert.equal(upload.state, 'running');
     assert.equal(created[0].reverse, false);
+    assert.equal(created[0].target, '192.0.2.10');
+    assert.equal(created[0].port, 5202);
 
     const download = makePending('tg_download');
+    download.chatId = -1001;
+    download.chatType = 'group';
     telegramTest.activeTests.set(download.id, download);
     await telegramTest.finishTest(download);
-    await telegramTest.callbackQuery({ id: 'direction-down', from: { id: 42 }, data: 'tg:tg_download:direction:down:42' });
+    const privateButton = requests
+      .filter((request) => request.url.endsWith('/editMessageText'))
+      .flatMap((request) => request.body.reply_markup?.inline_keyboard?.flat() || [])
+      .find((button) => button.url?.endsWith('_down'));
+    assert.match(privateButton.url, /t\.me\/netpilot_test_bot\?start=iperf_tg_download_down$/);
+    await telegramTest.handleMessage({ message_id: 70, from: { id: 42 }, chat: { id: 42, type: 'private' }, text: '/start iperf_tg_download_down' });
+    assert.equal(download.state, 'awaiting_target');
+    assert.equal(download.inputChatId, 42);
+    await telegramTest.handleMessage({ message_id: 71, from: { id: 42 }, chat: { id: 42, type: 'private' }, text: '198.51.100.20' });
     assert.equal(download.state, 'running');
     assert.equal(created[1].reverse, true);
+    assert.equal(created[1].target, '198.51.100.20');
 
     const closed = makePending('tg_close');
     telegramTest.activeTests.set(closed.id, closed);
@@ -242,7 +268,7 @@ test('Telegram direction picker starts upload or download only after a direction
   }
 });
 
-test('Telegram command responses reply to the message that invoked the Bot', async () => {
+test('Telegram no-argument and quick commands use distinct flows and reply to the invoking message', async () => {
   const originalApi = globalThis.netpilotServerApi;
   const originalFetch = globalThis.fetch;
   const requests = [];
@@ -257,7 +283,9 @@ test('Telegram command responses reply to the message that invoked the Bot', asy
       run() {},
       now() { return new Date().toISOString(); }
     },
-    getSettings() { return { telegram_bot_token: '123456789:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA' }; }
+    getSettings() { return { telegram_bot_token: '123456789:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA', telegram_bot_username: 'netpilot_test_bot' }; },
+    createTest(_user, body) { return { id: 'task_quick', ...body }; },
+    audit() {}
   };
   globalThis.fetch = async (url, options) => {
     requests.push({ url: String(url), body: JSON.parse(options.body) });
@@ -267,12 +295,23 @@ test('Telegram command responses reply to the message that invoked the Bot', asy
   let telegramTest;
   try {
     ({ telegramTest } = await import(`../src/telegram.js?reply=${Date.now()}`));
-    await telegramTest.handleMessage({ message_id: 456, from: { id: 42 }, chat: { id: 100, type: 'private' }, text: '/iperf 192.0.2.1' });
+    await telegramTest.handleMessage({ message_id: 455, from: { id: 42 }, chat: { id: 100, type: 'private' }, text: '/iperf' });
     const picker = requests.find((request) => request.url.endsWith('/sendMessage'));
-    assert.deepEqual(picker.body.reply_parameters, { message_id: 456 });
-    const pending = [...telegramTest.activeTests.values()][0];
-    assert.equal(pending.replyToMessageId, 456);
-    assert.equal(pending.directionRequired, true);
+    assert.deepEqual(picker.body.reply_parameters, { message_id: 455 });
+    const interactive = [...telegramTest.activeTests.values()][0];
+    assert.equal(interactive.directionRequired, true);
+    assert.equal(interactive.targetRequired, true);
+    telegramTest.activeTests.clear();
+
+    await telegramTest.handleMessage({ message_id: 456, from: { id: 42 }, chat: { id: 100, type: 'private' }, text: '/iperf 192.0.2.1' });
+    const quick = [...telegramTest.activeTests.values()][0];
+    assert.equal(quick.replyToMessageId, 456);
+    assert.equal(quick.directionRequired, false);
+    assert.equal(quick.targetRequired, false);
+    await telegramTest.callbackQuery({ id: 'quick-toggle', from: { id: 42 }, data: `tg:${quick.id}:toggle:agent_one:42` });
+    await telegramTest.callbackQuery({ id: 'quick-done', from: { id: 42 }, data: `tg:${quick.id}:done:42` });
+    assert.equal(quick.state, 'running');
+    assert.equal(quick.reverse, false);
   } finally {
     telegramTest?.activeTests.clear();
     globalThis.netpilotServerApi = originalApi;

@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
+import { statSync } from 'node:fs';
 import test from 'node:test';
+import { Resvg } from '@resvg/resvg-js';
 
 test('Telegram picker binds callbacks to requester and rejects other users', async () => {
   const originalApi = globalThis.netpilotServerApi;
@@ -513,4 +515,28 @@ test('Telegram registers its command menu when the Bot starts', async () => {
     globalThis.netpilotServerApi = originalApi;
     globalThis.fetch = originalFetch;
   }
+});
+
+// Production containers ship no system fonts, and resvg silently drops text it
+// cannot shape: charts arrived without axis numbers, point values or legend
+// labels. The PNG must be rasterized with the bundled font so labels survive
+// headless hosts.
+test('Telegram chart PNG keeps labels when the host has no fonts', async () => {
+  const { telegramTest } = await import(`../src/telegram.js?chartfont=${Date.now()}`);
+  assert.ok(statSync(telegramTest.chartFontPath).size > 1_000_000, 'bundled chart font must exist');
+
+  const svg = telegramTest.chartSvg(
+    [
+      { second: 1, sendMbps: 940.25, recvMbps: 940.25 },
+      { second: 2, sendMbps: 870.5, recvMbps: 870.5 },
+      { second: 3, sendMbps: 901.75, recvMbps: 901.75 }
+    ],
+    { title: '广州节点 - x.x.x.x:5201' }
+  );
+  const width = 1440;
+  const fontless = new Resvg(svg, { fitTo: { mode: 'width', value: width }, font: { loadSystemFonts: false } }).render().asPng();
+  const bundled = new Resvg(svg, telegramTest.chartResvgOptions(width, { systemFonts: false })).render().asPng();
+
+  assert.notEqual(Buffer.compare(bundled, fontless), 0, 'bundled font render must draw glyphs a fontless render cannot');
+  assert.ok(bundled.length > fontless.length, 'labeled chart must produce more pixels than the textless blank chart');
 });

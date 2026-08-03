@@ -312,3 +312,5 @@ Copyright (C) 2026 NetPilot contributors.
 NetPilot 使用 GNU Affero General Public License v3.0 only 开源，详见 [LICENSE](LICENSE)。
 
 Agent 安装包和镜像还包含单独以 GPL-3.0 发布的 NextTrace v1.7.1 可执行文件。其源码、署名和安装后的许可证位置记录在 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。GeoIP 和 MapTrace 默认关闭，因为外部服务条款可能限制第三方使用。
+
+服务端内置 WenQuanYi Micro Hei 字体（Apache-2.0 或 GPL-3.0 字体嵌入例外双许可），用于在无系统字体的容器中将 Telegram 速率图的坐标轴、数据点数值、图例和中文标题渲染为 PNG，详见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。

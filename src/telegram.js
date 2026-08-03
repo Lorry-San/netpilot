@@ -1,9 +1,13 @@
 import { createHash } from 'node:crypto';
+import { existsSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { Resvg } from '@resvg/resvg-js';
 
 const api = globalThis.netpilotServerApi;
 const db = api?.db;
 const PAGE_SIZE = 4;
+const CHART_FONT_FAMILY = 'WenQuanYi Micro Hei';
+const chartFontPath = fileURLToPath(new URL('../assets/fonts/WenQuanYiMicroHei.ttc', import.meta.url));
 const REDACTED_IP = 'x.x.x.x';
 const COMMANDS = new Set(['/start', '/help', '/status', '/bind', '/agents', '/iperf', '/nexttrace']);
 const activeTests = new Map();
@@ -260,11 +264,27 @@ function iperfChartSvg(view, test) {
   return chartSvg(view.metrics, { title: `${view.agentName} - ${iperfDisplayTarget(test, view.target)}:${view.port}` });
 }
 
+// The production image ships no system fonts, and resvg drops text it cannot
+// shape. Always resolve generic families against the bundled CJK font so axes,
+// point values and legends survive headless containers. systemFonts=false is
+// only used by tests to prove rendering never depends on the host.
+function chartResvgOptions(width, { systemFonts = true } = {}) {
+  return {
+    fitTo: { mode: 'width', value: width },
+    font: {
+      ...(existsSync(chartFontPath) ? { fontFiles: [chartFontPath] } : {}),
+      loadSystemFonts: systemFonts,
+      defaultFontFamily: CHART_FONT_FAMILY,
+      sansSerifFamily: CHART_FONT_FAMILY
+    }
+  };
+}
+
 async function sendChart(chatId, view, batchStartedAt, replyToMessageId, test) {
   if (!view.metrics.length) return false;
   const svg = iperfChartSvg(view, test);
   try {
-    const png = new Resvg(svg, { fitTo: { mode: 'width', value: Math.min(2400, Math.max(1440, view.metrics.length * 100)) } }).render().asPng();
+    const png = new Resvg(svg, chartResvgOptions(Math.min(2400, Math.max(1440, view.metrics.length * 100)))).render().asPng();
     const timestamp = new Date(view.finishedAt || Date.now()).toISOString().replaceAll(':', '-').replace(/\.\d{3}Z$/, 'Z');
     const caption = `速度 / 时间曲线\nAgent：${view.agentName}\n测试耗时：${formatDuration(elapsedMs(view.createdAt, view.finishedAt))}\n当前总耗时：${formatDuration(elapsedMs(batchStartedAt, view.finishedAt || Date.now()))}`;
     await upload('sendDocument', { chat_id: chatId, caption, ...replyTo(replyToMessageId) }, 'document', `netpilot-${timestamp}.png`, png, 'image/png');
@@ -1005,4 +1025,4 @@ export async function startTelegramBot() {
   }
 }
 
-export const telegramTest = { activeTests, activeTraces, beginSelectedTest, callbackQuery, chartSvg, completeTelegramTask, completeTelegramTrace, directionKeyboard, finishTest, handleChatMember, handleMessage, iperfChartSvg, iperfDisplayTarget, parseIperfArgs, parseNextTraceArgs, parseTargetInput, privateTargetKeyboard, progressKeyboard, redactIperfTargetText, resultText, selectionKeyboard, traceSelectionKeyboard };
+export const telegramTest = { activeTests, activeTraces, beginSelectedTest, callbackQuery, chartFontPath, chartResvgOptions, chartSvg, completeTelegramTask, completeTelegramTrace, directionKeyboard, finishTest, handleChatMember, handleMessage, iperfChartSvg, iperfDisplayTarget, parseIperfArgs, parseNextTraceArgs, parseTargetInput, privateTargetKeyboard, progressKeyboard, redactIperfTargetText, resultText, selectionKeyboard, traceSelectionKeyboard };

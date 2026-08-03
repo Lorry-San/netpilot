@@ -56,6 +56,7 @@ Telegram API <─ long polling ── Node.js 控制端 ── SQLite WAL
 | `public/index.html` | 单页应用结构、表单和对话框 |
 | `public/app.js` | 前端状态、API、实时 WS、图表和交互 |
 | `public/styles.css` | 全部 Web 样式 |
+| `assets/fonts/` | Telegram 图表 PNG 栅格化内置字体（WenQuanYi Micro Hei）及许可证 |
 | `public/install-agent.sh` | 原生 Agent 一键安装 |
 | `public/update-agent.sh` | 原生/Docker Agent 更新、校验和、回滚 |
 | `agent/main.go` | Agent 鉴权、互斥、命令执行、流式输出、探针、自动更新 |
@@ -73,6 +74,7 @@ Telegram API <─ long polling ── Node.js 控制端 ── SQLite WAL
 
 - Node.js 最低 `22.5`，Docker/CI 使用 Node.js 24。
 - npm 依赖：`ws`、`@resvg/resvg-js`。
+- 图表 PNG 的文字由 `assets/fonts/` 内置字体渲染（生产镜像没有系统字体，resvg 会静默丢字）；服务端 Dockerfile 必须复制该目录。
 - SQLite 使用 Node 内置 `node:sqlite`。
 - 默认端口 `8080`，Docker 数据库为 `/data/netpilot.sqlite`。
 - SQLite 启用 WAL、外键和 5 秒 busy timeout。
@@ -293,7 +295,7 @@ Agent 发出：`agent.info`、`agent.heartbeat`、`task.stdout/stderr/metric/don
 - 多 Agent 严格串行，避免标准 iperf3 服务端一次只能接一个客户端。
 - `/nexttrace [安全参数] 目标`：选择一个支持 NextTrace 的 Agent。
 - 回调 data 包含发起者 Telegram ID；每次回调都要重新检查。
-- Bot 任务消息回复最初召唤命令，最终图作为文件发送。
+- Bot 任务消息回复最初召唤命令，最终图作为文件发送。图表 SVG 含坐标轴、数据点数值和图例，栅格化时必须经 `chartResvgOptions` 加载内置字体，否则容器内文字全部丢失。
 
 ### 私有群脱敏和群聊过滤
 

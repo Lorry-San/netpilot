@@ -302,3 +302,5 @@ Copyright (C) 2026 NetPilot contributors.
 NetPilot is licensed under the GNU Affero General Public License, version 3 only. See [LICENSE](LICENSE).
 
 Agent installations and images also contain the separate NextTrace v1.7.1 executable under GPL-3.0. Its exact source, attribution and installed license location are documented in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). GeoIP and MapTrace are disabled by default because external provider terms may restrict third-party use.
+
+The server bundles the WenQuanYi Micro Hei font (dual-licensed under Apache-2.0 or GPL-3.0 with font embedding exceptions) so Telegram speed charts keep axis numbers, data point values, legends and CJK titles when rendered to PNG inside containers without system fonts. See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

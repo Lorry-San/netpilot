@@ -2,6 +2,8 @@
 
 [English](README.md) | 简体中文
 
+维护者请先阅读 [项目交接文档](HANDOFF.md)。仓库还提供 NetPilot 开发、发布和生产运维三个 Codex skill，位于 [`.codex/skills`](.codex/skills)。
+
 [![构建与发布](https://github.com/Lorry-San/netpilot/actions/workflows/build.yml/badge.svg)](https://github.com/Lorry-San/netpilot/actions/workflows/build.yml)
 [![GitHub Release](https://img.shields.io/github/v/release/Lorry-San/netpilot)](https://github.com/Lorry-San/netpilot/releases/latest)
 [![许可证：AGPL-3.0](https://img.shields.io/badge/License-AGPL--3.0-blue.svg)](LICENSE)

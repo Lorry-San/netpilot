@@ -2,6 +2,8 @@
 
 English | [简体中文](README.zh-CN.md)
 
+Maintainers should start with the [project handoff document](HANDOFF.md). Repository-scoped Codex skills for development, releases, and production operations live in [`.codex/skills`](.codex/skills).
+
 [![Build and publish](https://github.com/Lorry-San/netpilot/actions/workflows/build.yml/badge.svg)](https://github.com/Lorry-San/netpilot/actions/workflows/build.yml)
 [![GitHub release](https://img.shields.io/github/v/release/Lorry-San/netpilot)](https://github.com/Lorry-San/netpilot/releases/latest)
 [![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL--3.0-blue.svg)](LICENSE)

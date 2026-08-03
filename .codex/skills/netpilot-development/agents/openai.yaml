@@ -1,0 +1,4 @@
+interface:
+  display_name: "NetPilot Development"
+  short_description: "Safely modify NetPilot server, UI, Bot, and Agent"
+  default_prompt: "Use $netpilot-development to implement and validate a NetPilot code change."

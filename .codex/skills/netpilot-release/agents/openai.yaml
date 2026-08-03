@@ -1,0 +1,4 @@
+interface:
+  display_name: "NetPilot Release"
+  short_description: "Publish and verify NetPilot releases through CI"
+  default_prompt: "Use $netpilot-release to prepare and verify a NetPilot release."

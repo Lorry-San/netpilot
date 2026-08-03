@@ -1,0 +1,4 @@
+interface:
+  display_name: "NetPilot Production Ops"
+  short_description: "Diagnose and safely operate NetPilot production"
+  default_prompt: "Use $netpilot-production-ops to diagnose or update the NetPilot production deployment."

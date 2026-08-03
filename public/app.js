@@ -509,17 +509,15 @@ function pickerAction(containerId, action) {
   }
 }
 
-function showInstall(install) {
+function showInstall(install, trigger) {
   $('#install-docker').value = install.docker;
   $('#install-script').value = install.script;
-  $('#install-panel').hidden = false;
-  $('#install-panel').scrollIntoView({ behavior: 'smooth', block: 'start' });
+  showDialog($('#install-panel'), trigger);
 }
 
-function showAgentUpdate(update) {
+function showAgentUpdate(update, trigger) {
   $('#agent-update-command').value = update.command;
-  $('#update-agent-panel').hidden = false;
-  $('#update-agent-panel').scrollIntoView({ behavior: 'smooth', block: 'start' });
+  showDialog($('#update-agent-panel'), trigger);
 }
 
 async function requestAutoUpdate(agent) {
@@ -550,16 +548,18 @@ function renderAgents() {
       const connected = agent.status === 'online' || agent.status === 'busy';
       const autoUpdateLabel = agent.status === 'online' ? (agent.autoUpdateSupported === false ? '先手动更新' : '自动更新') : (agent.status === 'busy' ? '忙碌中' : '离线不可自动');
       actions.appendChild(button(autoUpdateLabel, 'secondary', () => requestAutoUpdate(agent), agent.status !== 'online' || agent.autoUpdateSupported === false));
-      actions.appendChild(button(agent.status === 'busy' ? '忙碌中' : '手动更新', 'secondary', async () => {
+      actions.appendChild(button(agent.status === 'busy' ? '忙碌中' : '手动更新', 'secondary', async (event) => {
+        const trigger = event.currentTarget;
         try {
           const result = await api(`/api/admin/agents/${encodeURIComponent(agent.id)}/update-command`, { method: 'POST', body: '{}' });
-          showAgentUpdate(result.update);
+          showAgentUpdate(result.update, trigger);
         } catch (error) { toast(error.message); }
       }, agent.status === 'busy'));
-      actions.appendChild(button(connected ? '在线不可安装' : '安装命令', 'secondary', async () => {
+      actions.appendChild(button(connected ? '在线不可安装' : '安装命令', 'secondary', async (event) => {
+        const trigger = event.currentTarget;
         try {
           const result = await api(`/api/admin/agents/${encodeURIComponent(agent.id)}/install`, { method: 'POST', body: '{}' });
-          showInstall(result.install);
+          showInstall(result.install, trigger);
         } catch (error) { toast(error.message); }
       }, connected));
       actions.appendChild(button('删除', 'secondary', async () => {
@@ -1193,12 +1193,12 @@ $('#agent-form').addEventListener('submit', async (event) => {
     const result = await api('/api/admin/agents', { method: 'POST', body: JSON.stringify({ name: $('#agent-name').value }) });
     $('#agent-dialog').close();
     form.reset();
-    showInstall(result.install);
+    showInstall(result.install, $('#add-agent'));
     await loadAgents();
   } catch (error) { toast(error.message); }
 });
-$('#close-install').addEventListener('click', () => { $('#install-panel').hidden = true; });
-$('#close-agent-update').addEventListener('click', () => { $('#update-agent-panel').hidden = true; });
+$('#close-install').addEventListener('click', () => { $('#install-panel').close(); });
+$('#close-agent-update').addEventListener('click', () => { $('#update-agent-panel').close(); });
 $$('.copy-command').forEach((node) => node.addEventListener('click', async () => {
   try { await navigator.clipboard.writeText($(`#${node.dataset.target}`).value); toast('命令已复制'); }
   catch { toast('复制失败，请手动选择命令'); }

@@ -341,6 +341,7 @@ dialog {
   will-change: transform, opacity;
 }
 #user-dialog, #user-edit-dialog { width: min(560px, calc(100% - 32px)); }
+.command-dialog { width: min(640px, calc(100% - 32px)); }
 dialog::backdrop { background: rgba(10, 14, 18, .36); -webkit-backdrop-filter: blur(6px); backdrop-filter: blur(6px); }
 dialog form { display: grid; gap: 14px; padding: 18px; }
 .dialog-heading { min-height: 48px; display: flex; align-items: center; justify-content: space-between; margin: -18px -18px 0; padding: 0 18px; border-bottom: .5px solid var(--separator); }

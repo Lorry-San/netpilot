@@ -4,9 +4,11 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>NetPilot</title>
-  <link rel="stylesheet" href="/styles.css?v=0.1.23">
+  <link rel="stylesheet" href="/styles.css?v=0.2.0">
 </head>
 <body>
+  <div class="bg-layer" aria-hidden="true"></div>
+  <div class="bg-tint" aria-hidden="true"></div>
   <main id="login-view" class="login-shell">
     <form id="login-form" class="login-panel">
       <div class="brand"><span class="brand-mark">N</span><strong>NetPilot</strong></div>
@@ -22,6 +24,7 @@
     <aside class="sidebar">
       <div class="brand"><span class="brand-mark">N</span><strong>NetPilot</strong></div>
       <nav>
+        <div id="nav-pill" class="nav-pill" hidden></div>
         <button data-view="tests" class="active">测试台</button>
         <button data-view="traces">路由追踪</button>
         <button data-view="agents">Agent</button>
@@ -286,6 +289,6 @@
   </dialog>
 
   <div id="toast" role="status" aria-live="polite"></div>
-  <script type="module" src="/app.js?v=0.1.23"></script>
+  <script type="module" src="/app.js?v=0.2.0"></script>
 </body>
 </html>

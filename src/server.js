@@ -867,7 +867,7 @@ function serveStatic(req, res, pathname) {
   const file = pathname === '/' ? 'index.html' : pathname.slice(1);
   const target = resolve(publicDir, file);
   if (!target.startsWith(publicDir) || !existsSync(target)) return false;
-  const contentTypes = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.sh': 'text/plain; charset=utf-8' };
+  const contentTypes = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.sh': 'text/plain; charset=utf-8', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.png': 'image/png', '.webp': 'image/webp', '.svg': 'image/svg+xml' };
   res.writeHead(200, { 'content-type': contentTypes[extname(target)] || 'application/octet-stream', 'cache-control': 'no-cache' });
   res.end(readFileSync(target));
   return true;

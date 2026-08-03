@@ -272,7 +272,12 @@ func downloadUpdateScript(ctx context.Context, scriptURL string) (string, error)
 	}
 	var file *os.File
 	if os.Geteuid() == 0 {
-		file, err = os.CreateTemp("/run", "netpilot-agent-update-*.sh")
+		for _, directory := range []string{"/run/netpilot-agent", "/dev/shm", "/run"} {
+			file, err = os.CreateTemp(directory, "netpilot-agent-update-*.sh")
+			if err == nil {
+				break
+			}
+		}
 	}
 	if file == nil {
 		file, err = os.CreateTemp("", "netpilot-agent-update-*.sh")
@@ -331,9 +336,8 @@ func updaterCommand(ctx context.Context, updateID, scriptPath string, params upd
 	if systemdManagedAgent() {
 		unit := "netpilot-agent-update-" + safeUnitPattern.ReplaceAllString(updateID, "-")
 		args := []string{"--unit", unit}
-		waitSupported := systemdRunSupports("--wait")
-		if waitSupported {
-			args = append(args, "--wait")
+		if systemdRunSupports("--no-block") {
+			args = append(args, "--no-block")
 		}
 		if systemdRunSupports("--collect") {
 			args = append(args, "--collect")
@@ -345,10 +349,7 @@ func updaterCommand(ctx context.Context, updateID, scriptPath string, params upd
 			"NETPILOT_UPDATE_MODE=auto",
 			"/bin/sh", "-c", `script="$1"; /bin/sh "$script"; status=$?; rm -f "$script"; exit "$status"`, "netpilot-agent-update", scriptPath,
 		)
-		if !waitSupported {
-			return exec.Command("systemd-run", args...), true
-		}
-		return exec.CommandContext(ctx, "systemd-run", args...), false
+		return exec.CommandContext(ctx, "systemd-run", args...), true
 	}
 	cmd := exec.CommandContext(ctx, "sh", scriptPath)
 	cmd.Env = updateEnvironment(params)
@@ -644,12 +645,17 @@ func executeUpdate(parent context.Context, c *client, updateID string, raw map[s
 
 	cmd, detached := updaterCommand(ctx, updateID, scriptPath, params)
 	if detached {
-		if err := cmd.Start(); err != nil {
+		output, commandErr := cmd.CombinedOutput()
+		for _, line := range strings.Split(strings.TrimSpace(string(output)), "\n") {
+			if line != "" {
+				_ = c.send(message{Type: "agent.update.output", TaskID: updateID, Payload: map[string]any{"line": line}})
+			}
+		}
+		if commandErr != nil {
 			_ = os.Remove(scriptPath)
-			_ = c.send(message{Type: "agent.update.done", TaskID: updateID, Payload: map[string]any{"exitCode": 1, "oldVersion": oldVersion, "newVersion": oldVersion, "error": err.Error()}})
+			_ = c.send(message{Type: "agent.update.done", TaskID: updateID, Payload: map[string]any{"exitCode": 1, "oldVersion": oldVersion, "newVersion": oldVersion, "error": commandErr.Error()}})
 			return
 		}
-		_ = cmd.Process.Release()
 		_ = c.send(message{Type: "agent.update.output", TaskID: updateID, Payload: map[string]any{"line": "Updater was handed off to systemd; waiting for the Agent to reconnect with the new version."}})
 		return
 	}

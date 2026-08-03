@@ -75,7 +75,7 @@ test('static assets and installer script are served', async (t) => {
   assert.match(indexHtml, /id="view-traces"/);
   assert.match(indexHtml, /id="trace-packet-size"/);
   assert.match(indexHtml, /id="setting-nexttrace-provider"/);
-  assert.match(indexHtml, /\/app\.js\?v=0\.1\.18/);
+  assert.match(indexHtml, /\/app\.js\?v=0\.1\.19/);
   assert.match(indexHtml, /id="generate-telegram-code"/);
   assert.match(indexHtml, /id="telegram-group-choices"/);
   assert.match(indexHtml, /id="telegram-groups-all-members"/);
@@ -117,6 +117,7 @@ test('static assets and installer script are served', async (t) => {
   assert.match(script, /NETPILOT_GITHUB_ACCEL/);
   assert.match(script, /nexttrace_linux_/);
   assert.match(script, /NEXTTRACE_VERSION="v1\.7\.1"/);
+  assert.match(script, /RuntimeDirectory=netpilot-agent/);
 
   const updater = await fetch(`${base}/update-agent.sh`);
   assert.equal(updater.status, 200);
@@ -124,6 +125,7 @@ test('static assets and installer script are served', async (t) => {
   assert.match(updateScript, /SHA256SUMS/);
   assert.match(updateScript, /x86_64\|amd64/);
   assert.match(updateScript, /aarch64\|arm64/);
+  assert.match(updateScript, /runtime-directory\.conf/);
   assert.match(updateScript, /ROLLBACK="native"/);
   assert.match(updateScript, /ROLLBACK="docker"/);
   assert.match(updateScript, /systemctl/);

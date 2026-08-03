@@ -128,7 +128,7 @@ Administrators can open **Agent** and use either update path:
 - **Auto update** sends an authenticated WebSocket request to an online idle Agent. The page banner reports success or failure and includes the original and reported new version. Native `systemd` Agents are updated through a transient `systemd-run` unit when available, so the updater can survive the Agent service restart.
 - **Manual update** shows the root command to run on the Agent host. Use this for offline Agents, Docker Agents without host Docker access, or when automatic update fails.
 
-Agents older than `v0.1.7` either do not understand the automatic update WebSocket request or use the earlier updater handoff. The server refuses auto-update for those Agents and asks you to run the manual update command once. After that first manual upgrade, future web-triggered auto-updates are available.
+Agents older than `v0.1.19` either do not understand the automatic update WebSocket request or may place the downloaded updater inside systemd's private `/tmp` namespace. The server refuses auto-update for those Agents and asks you to run the manual update command once. The manual upgrade installs a shared runtime directory; future web-triggered auto-updates are handed off without waiting for the Agent service restart.
 
 Updating is blocked while the Agent is running an iperf or route-tracing task. The update does not rotate or expose the Agent token. Updating to v0.1.18 or newer also installs the pinned NextTrace executable; older Agents remain usable for iperf but are shown as not supporting route tracing.
 
@@ -238,7 +238,7 @@ The Agent authenticates with the first WSS frame:
     "agentId": "agent_example",
     "os": "linux",
     "arch": "amd64",
-    "version": "v0.1.18",
+    "version": "v0.1.19",
     "capabilities": ["iperf3", "nexttrace"],
     "nexttraceVersion": "v1.7.1"
   }

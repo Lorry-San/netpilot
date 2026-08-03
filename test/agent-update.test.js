@@ -21,6 +21,7 @@ async function runUpdater({ failHealth = false } = {}) {
   const nexttraceLicenseRelease = join(directory, 'nexttrace-license-release');
   const nexttraceBinary = join(directory, 'installed', 'nexttrace');
   const nexttraceLicense = join(directory, 'installed', 'LICENSE');
+  const systemdOverrideDirectory = join(directory, 'systemd-override');
   const serviceLog = join(directory, 'service.log');
   await mkdir(binDirectory);
   await executable(agentBinary, '#!/bin/sh\necho v0.1.2\n');
@@ -33,7 +34,7 @@ async function runUpdater({ failHealth = false } = {}) {
   await executable(join(binDirectory, 'uname'), '#!/bin/sh\necho x86_64\n');
   await executable(join(binDirectory, 'curl'), `#!/bin/sh\nurl=""\ndestination=""\nwhile [ "$#" -gt 0 ]; do\n  case "$1" in\n    http*) url="$1" ;;\n    -o) shift; destination="$1" ;;\n  esac\n  shift\ndone\ncase "$url" in\n  */SHA256SUMS) cp '${join(directory, 'SHA256SUMS')}' "$destination" ;;\n  */nexttrace_linux_amd64) cp '${nexttraceRelease}' "$destination" ;;\n  */LICENSE) cp '${nexttraceLicenseRelease}' "$destination" ;;\n  *) cp '${releaseBinary}' "$destination" ;;\nesac\n`);
   await executable(join(binDirectory, 'sha256sum'), `#!/bin/sh\ncase "$1" in\n  */nexttrace) echo '1f4c559cbdf6f667a1a9e050567c9cf1fc11741e8cc1e50f5fdcaf2dbb247232  '"$1" ;;\n  */NEXTTRACE-LICENSE) echo '3972dc9744f6499f0f9b2dbf76696f2ae7ad8af9b23dde66d6af86c9dfb36986  '"$1" ;;\n  *) /usr/bin/sha256sum "$@" ;;\nesac\n`);
-  await executable(join(binDirectory, 'systemctl'), `#!/bin/sh\necho "$1" >> '${serviceLog}'\ncase "$1" in\n  cat|stop|start) exit 0 ;;\n  is-active) [ "${failHealth ? '1' : '0'}" = 0 ] ;;
+  await executable(join(binDirectory, 'systemctl'), `#!/bin/sh\necho "$1" >> '${serviceLog}'\ncase "$1" in\n  cat|stop|start|daemon-reload) exit 0 ;;\n  is-active) [ "${failHealth ? '1' : '0'}" = 0 ] ;;
   *) exit 1 ;;
 esac\n`);
 
@@ -45,7 +46,8 @@ esac\n`);
       NETPILOT_UPDATE_MODE: 'native',
       NETPILOT_AGENT_BINARY: agentBinary,
       NETPILOT_NEXTTRACE_BINARY: nexttraceBinary,
-      NETPILOT_NEXTTRACE_LICENSE: nexttraceLicense
+      NETPILOT_NEXTTRACE_LICENSE: nexttraceLicense,
+      NETPILOT_SYSTEMD_OVERRIDE_DIR: systemdOverrideDirectory
     },
     stdio: ['ignore', 'pipe', 'pipe']
   });
@@ -67,7 +69,7 @@ test('native Agent updater verifies and replaces the binary', { skip }, async ()
   assert.equal(result.version, 'v0.1.3');
   assert.equal(result.nexttraceVersion, 'v1.7.1');
   assert.match(result.stdout, /updated to v0\.1\.3/);
-  assert.match(result.log, /stop\nstart\nis-active/);
+  assert.match(result.log, /daemon-reload\nstop\nstart\nis-active/);
 });
 
 test('native Agent updater rolls back when the service is unhealthy', { skip }, async () => {
@@ -75,5 +77,5 @@ test('native Agent updater rolls back when the service is unhealthy', { skip }, 
   assert.notEqual(result.exitCode, 0);
   assert.equal(result.version, 'v0.1.2');
   assert.match(result.stderr, /restoring previous Agent binary/);
-  assert.match(result.log, /stop\nstart\nis-active\nstop\nstart/);
+  assert.match(result.log, /daemon-reload\nstop\nstart\nis-active\nstop\nstart/);
 });

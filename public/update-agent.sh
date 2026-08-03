@@ -9,6 +9,7 @@ CONTAINER="${NETPILOT_AGENT_CONTAINER:-netpilot-agent}"
 NEXTTRACE_VERSION="v1.7.1"
 NEXTTRACE_BINARY="${NETPILOT_NEXTTRACE_BINARY:-/usr/local/bin/nexttrace}"
 NEXTTRACE_LICENSE="${NETPILOT_NEXTTRACE_LICENSE:-/usr/share/licenses/nexttrace/LICENSE}"
+SYSTEMD_OVERRIDE_DIR="${NETPILOT_SYSTEMD_OVERRIDE_DIR:-/etc/systemd/system/netpilot-agent.service.d}"
 umask 077
 
 if [ -n "$ACCEL" ] && [ "${ACCEL%/}" = "$ACCEL" ]; then ACCEL="${ACCEL}/"; fi
@@ -89,6 +90,17 @@ detect_service() {
   return 1
 }
 
+install_systemd_runtime_override() {
+  if [ "$SERVICE" != "systemd" ]; then return; fi
+  mkdir -p "$SYSTEMD_OVERRIDE_DIR"
+  cat > "$SYSTEMD_OVERRIDE_DIR/runtime-directory.conf" <<'UNIT'
+[Service]
+RuntimeDirectory=netpilot-agent
+RuntimeDirectoryMode=0700
+UNIT
+  systemctl daemon-reload
+}
+
 update_native() {
   if [ "$(id -u)" -ne 0 ]; then
     echo "Native Agent updates must run as root." >&2
@@ -102,6 +114,7 @@ update_native() {
     echo "sha256sum is required to verify the Agent release." >&2
     exit 1
   fi
+  install_systemd_runtime_override
 
   case "$ARCH" in
     amd64) nexttrace_checksum="1f4c559cbdf6f667a1a9e050567c9cf1fc11741e8cc1e50f5fdcaf2dbb247232" ;;

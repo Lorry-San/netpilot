@@ -1,6 +1,12 @@
 # NetPilot
 
-NetPilot is a self-hosted web control plane for distributed `iperf3` and NextTrace tests. A Node.js server stores state in SQLite and sends test jobs to outbound-only Go agents over authenticated WebSocket connections.
+English | [简体中文](README.zh-CN.md)
+
+[![Build and publish](https://github.com/Lorry-San/netpilot/actions/workflows/build.yml/badge.svg)](https://github.com/Lorry-San/netpilot/actions/workflows/build.yml)
+[![GitHub release](https://img.shields.io/github/v/release/Lorry-San/netpilot)](https://github.com/Lorry-San/netpilot/releases/latest)
+[![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL--3.0-blue.svg)](LICENSE)
+
+NetPilot is a self-hosted web control plane for distributed `iperf3` and NextTrace tests. Its Node.js server stores state in SQLite and dispatches jobs to outbound-only Go agents over authenticated WebSocket connections. The browser provides live output, speed charts, route details, multi-user access control and Agent management; the same Agents are also available through an optional Telegram Bot.
 
 ## Features
 

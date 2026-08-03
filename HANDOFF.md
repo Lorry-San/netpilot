@@ -9,8 +9,8 @@
 | GitHub | `Lorry-San/netpilot` |
 | 默认分支 | `main` |
 | 许可证 | `AGPL-3.0-only` |
-| 交接版本 | `v0.1.23` |
-| 交接提交 | `v0.1.23` 标签指向的发布提交 |
+| 交接版本 | `v0.2.0` |
+| 交接提交 | `v0.2.0` 标签指向的发布提交 |
 | 核对日期 | 2026-08-03（Asia/Shanghai） |
 | 生产站点 | `https://iperf.nbiepl.cloud` |
 | 生产主机 | `103.240.198.97` |
@@ -55,7 +55,8 @@ Telegram API <─ long polling ── Node.js 控制端 ── SQLite WAL
 | `src/crypto.js` | scrypt 密码、随机 Token、SHA-256 摘要 |
 | `public/index.html` | 单页应用结构、表单和对话框 |
 | `public/app.js` | 前端状态、API、实时 WS、图表和交互 |
-| `public/styles.css` | 全部 Web 样式 |
+| `public/styles.css` | 全部 Web 样式（v0.2.0 起为 Liquid Glass 设计系统） |
+| `public/assets/` | 内置静态资源（背景图等），服务端按扩展名映射图片 MIME |
 | `assets/fonts/` | Telegram 图表 PNG 栅格化内置字体（WenQuanYi Micro Hei）及许可证 |
 | `public/install-agent.sh` | 原生 Agent 一键安装 |
 | `public/update-agent.sh` | 原生/Docker Agent 更新、校验和、回滚 |
@@ -335,6 +336,8 @@ Agent 发出：`agent.info`、`agent.heartbeat`、`task.stdout/stderr/metric/don
 
 ## 14. 前端维护要点
 
+- v0.2.0 起前端为 Apple 风格 Liquid Glass 设计系统：青绿主题色、悬浮圆角侧栏、玻璃材质面板、`public/assets/background.jpg` 固定背景层；明暗双模式跟随系统。
+- `app.js` 内置微弹簧引擎（damping ratio + response，可中断、从当前展示值启动）；页面切换、导航胶囊、Toast、对话框、指标数字和图表新点都走弹簧。`prefers-reduced-motion` 必须退化为瞬时/淡入，`prefers-reduced-transparency` 必须退化为实色。
 - `public/app.js` 全局 state 保存用户、Agent、用户列表、测试、路由、Telegram、设置和 WS。
 - 刷新通过 `/api/me` 恢复 Cookie 会话，不应重新登录。
 - 对话框取消按钮必须避免提交并调用原生 `close()`。

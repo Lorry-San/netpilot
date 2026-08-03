@@ -12,6 +12,8 @@ NetPilot is a self-hosted web control plane for distributed `iperf3` and NextTra
 
 ## Features
 
+- Apple-style Liquid Glass interface: teal accent, floating rounded sidebar, glass-material panels and a bundled background image, with light/dark modes following the system
+- Interruptible spring animations across the UI: view transitions, navigation pill, dialogs, live metric numbers and new chart points, all degrading gracefully under reduced motion
 - TCP and UDP `iperf3` tests with target, port, duration, parallel streams, bandwidth and reverse (`-R`) options
 - Streaming ICMP/TCP/UDP NextTrace v1.7.1 route tracing with IPv4/IPv6, packet size, hop/query/timeout controls, PTR and MPLS output
 - Streaming raw output and speed/time metrics pushed live to the browser over `/ws/ui`

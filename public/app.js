@@ -2,6 +2,56 @@ const state = { user: null, agents: [], users: [], tests: [], traces: [], traceC
 const $ = (selector) => document.querySelector(selector);
 const $$ = (selector) => [...document.querySelectorAll(selector)];
 
+// Interruptible spring engine (damping ratio + response). Every animation
+// starts from the current presentation value and can be re-targeted mid-flight.
+const reducedMotion = matchMedia('(prefers-reduced-motion: reduce)').matches;
+function spring({ from = 0, to = 1, velocity = 0, dampingRatio = 1, response = 0.35, onUpdate, onComplete }) {
+  if (reducedMotion) { onUpdate(to); onComplete?.(); return () => {}; }
+  const omega = (2 * Math.PI) / response;
+  const stiffness = omega * omega;
+  const damping = 2 * dampingRatio * omega;
+  let value = from;
+  let vel = velocity;
+  let last;
+  let raf;
+  const tick = (time) => {
+    const dt = Math.min((time - (last ?? time)) / 1000, 0.032);
+    last = time;
+    vel += (-stiffness * (value - to) - damping * vel) * dt;
+    value += vel * dt;
+    onUpdate(value, vel);
+    if (Math.abs(value - to) > 0.001 || Math.abs(vel) > 0.001) raf = requestAnimationFrame(tick);
+    else { onUpdate(to); onComplete?.(); }
+  };
+  raf = requestAnimationFrame(tick);
+  return () => cancelAnimationFrame(raf);
+}
+
+// Scale/fade a dialog open from its trigger, keeping the spatial origin.
+function showDialog(dialog, trigger) {
+  dialog.showModal();
+  let ox = 0;
+  let oy = 0;
+  if (trigger) {
+    const source = trigger.getBoundingClientRect();
+    const box = dialog.getBoundingClientRect();
+    ox = source.left + source.width / 2 - (box.left + box.width / 2);
+    oy = source.top + source.height / 2 - (box.top + box.height / 2);
+  }
+  spring({
+    from: 0,
+    to: 1,
+    response: 0.32,
+    onUpdate: (v) => {
+      const inv = 1 - v;
+      dialog.style.opacity = v;
+      dialog.style.transform = `translate(${ox * inv}px, ${oy * inv}px) scale(${0.86 + 0.14 * v})`;
+    },
+    onComplete: () => { dialog.style.opacity = ''; dialog.style.transform = ''; }
+  });
+}
+$$('dialog').forEach((node) => node.addEventListener('close', () => { node.style.opacity = ''; node.style.transform = ''; }));
+
 async function api(path, options = {}) {
   const response = await fetch(path, {
     ...options,
@@ -15,9 +65,23 @@ async function api(path, options = {}) {
 function toast(message) {
   const target = $('#toast');
   target.textContent = message;
-  target.classList.add('show');
   clearTimeout(target.timer);
-  target.timer = setTimeout(() => target.classList.remove('show'), 2600);
+  target.cancelShow?.();
+  target.cancelHide?.();
+  target.cancelShow = spring({
+    from: 0,
+    to: 1,
+    response: 0.38,
+    onUpdate: (v) => { target.style.opacity = v; target.style.transform = `translateY(${16 * (1 - v)}px)`; }
+  });
+  target.timer = setTimeout(() => {
+    target.cancelHide = spring({
+      from: 1,
+      to: 0,
+      response: 0.3,
+      onUpdate: (v) => { target.style.opacity = v; target.style.transform = `translateY(${16 * (1 - v)}px)`; }
+    });
+  }, 2600);
 }
 
 function clear(node) {
@@ -67,6 +131,14 @@ function showUpdateBanner(payload, tone = 'info') {
   banner.className = `update-banner ${tone}`;
   banner.textContent = payload;
   banner.hidden = false;
+  banner.cancelAnim?.();
+  banner.cancelAnim = spring({
+    from: 0,
+    to: 1,
+    response: 0.35,
+    onUpdate: (v) => { banner.style.opacity = v; banner.style.transform = `translateY(${-8 * (1 - v)}px)`; },
+    onComplete: () => { banner.style.opacity = ''; banner.style.transform = ''; }
+  });
 }
 
 function renderAgentUpdateStatus(payload = {}) {
@@ -195,6 +267,15 @@ async function showApp(user) {
   state.user = user;
   $('#login-view').hidden = true;
   $('#app-view').hidden = false;
+  const appView = $('#app-view');
+  appView.cancelAnim?.();
+  appView.cancelAnim = spring({
+    from: 1,
+    to: 0,
+    response: 0.4,
+    onUpdate: (v) => { appView.style.opacity = 1 - v; appView.style.transform = `translateY(${10 * v}px)`; },
+    onComplete: () => { appView.style.opacity = ''; appView.style.transform = ''; }
+  });
   refreshAccount();
   $$('[data-admin-only]').forEach((node) => { node.hidden = user.role !== 'admin'; });
   $$('[data-system-admin-only]').forEach((node) => { node.hidden = user.id !== 1; });
@@ -215,12 +296,41 @@ async function showApp(user) {
   }, 4000);
 }
 
+function moveNavPill(animate = true) {
+  const pill = $('#nav-pill');
+  const nav = $('.sidebar nav');
+  const active = nav?.querySelector('button.active');
+  if (!pill || !nav || !active) return;
+  const targetY = active.offsetTop;
+  pill.hidden = false;
+  pill.style.height = `${active.offsetHeight}px`;
+  const current = Number(pill.dataset.y ?? targetY);
+  pill.dataset.y = targetY;
+  pill.cancel?.();
+  if (!animate || current === targetY) { pill.style.transform = `translateY(${targetY}px)`; return; }
+  pill.cancel = spring({ from: current, to: targetY, response: 0.34, onUpdate: (v) => { pill.style.transform = `translateY(${v}px)`; } });
+}
+addEventListener('resize', () => moveNavPill(false));
+
 function setView(name) {
   if (name === 'users' && state.user?.role !== 'admin') return;
   if (name === 'settings' && state.user?.id !== 1) return;
+  const next = $(`#view-${name}`);
+  const wasVisible = next && !next.hidden;
   $$('.page').forEach((node) => { node.hidden = node.id !== `view-${name}`; });
   $('.sidebar nav').querySelectorAll('button').forEach((node) => node.classList.toggle('active', node.dataset.view === name));
   $('#page-title').textContent = { tests: '网络性能测试', traces: 'NextTrace 路由追踪', agents: 'Agent 管理', telegram: 'Telegram 机器人', users: '用户管理', settings: '系统设置' }[name];
+  moveNavPill();
+  if (next && !wasVisible) {
+    next.cancelAnim?.();
+    next.cancelAnim = spring({
+      from: 1,
+      to: 0,
+      response: 0.36,
+      onUpdate: (v) => { next.style.opacity = 1 - v; next.style.transform = `translateY(${8 * v}px)`; },
+      onComplete: () => { next.style.opacity = ''; next.style.transform = ''; }
+    });
+  }
 }
 
 async function loadVersion(refresh = false) {
@@ -316,13 +426,40 @@ function updateTraceAgent() {
   $('#start-trace').disabled = !agent || agent.status !== 'online' || !agent.supportsNextTrace;
 }
 
+const metricSprings = {};
+let metricAgentId = null;
+function springMetric(id, value) {
+  const el = $(id);
+  const num = Number(value);
+  if (!Number.isFinite(num)) { metricSprings[id]?.cancel?.(); delete metricSprings[id]; el.textContent = '--'; return; }
+  const entry = metricSprings[id] ??= { value: num, cancel: null };
+  entry.cancel?.();
+  entry.cancel = spring({
+    from: entry.value,
+    to: num,
+    response: 0.5,
+    onUpdate: (v) => { entry.value = v; el.textContent = `${v.toFixed(1)}%`; }
+  });
+}
+
 function updateSelectedAgent() {
   const agent = state.agents.find((item) => item.id === $('#test-agent').value);
+  if ((agent?.id ?? null) !== metricAgentId) {
+    metricAgentId = agent?.id ?? null;
+    for (const id of Object.keys(metricSprings)) { metricSprings[id].cancel?.(); delete metricSprings[id]; }
+  }
   $('#metric-agent').textContent = agent?.name || '未选择';
-  $('#metric-cpu').textContent = agent ? percentText(agent.cpuPercent) : '--';
-  $('#metric-memory').textContent = agent ? percentText(agent.memoryPercent) : '--';
-  $('#metric-upload').textContent = agent ? percentText(agent.uploadPercent) : '--';
-  $('#metric-download').textContent = agent ? percentText(agent.downloadPercent) : '--';
+  if (agent) {
+    springMetric('#metric-cpu', agent.cpuPercent);
+    springMetric('#metric-memory', agent.memoryPercent);
+    springMetric('#metric-upload', agent.uploadPercent);
+    springMetric('#metric-download', agent.downloadPercent);
+  } else {
+    springMetric('#metric-cpu', null);
+    springMetric('#metric-memory', null);
+    springMetric('#metric-upload', null);
+    springMetric('#metric-download', null);
+  }
   $('#start-test').disabled = !agent || agent.status !== 'online';
 }
 
@@ -601,7 +738,37 @@ async function loadTraces(options = {}) {
   renderTraces(options);
 }
 
+// Animated chart: REST loads snap to the target, live WS points spring in from
+// zero and mid-flight re-targets continue from the current presentation value.
+const chartAnim = { key: null, displayed: [], cancel: null };
 function drawChart(metrics) {
+  const target = metrics.map((metric) => ({ second: Number(metric.second || 0), send: Number(metric.sendMbps || 0), recv: Number(metric.recvMbps || 0) }));
+  const key = state.activeTestId || 'none';
+  if (chartAnim.key !== key || chartAnim.displayed.length > target.length) {
+    chartAnim.cancel?.();
+    chartAnim.key = key;
+    chartAnim.displayed = target.map((point) => ({ ...point }));
+    drawChartFrame(chartAnim.displayed.map((point) => ({ second: point.second, sendMbps: point.send, recvMbps: point.recv })));
+    return;
+  }
+  const from = target.map((point, index) => chartAnim.displayed[index] ? { ...chartAnim.displayed[index] } : { ...point, send: 0, recv: 0 });
+  chartAnim.cancel?.();
+  chartAnim.cancel = spring({
+    from: 0,
+    to: 1,
+    response: 0.42,
+    onUpdate: (progress) => {
+      chartAnim.displayed = target.map((point, index) => ({
+        second: point.second,
+        send: from[index].send + (point.send - from[index].send) * progress,
+        recv: from[index].recv + (point.recv - from[index].recv) * progress
+      }));
+      drawChartFrame(chartAnim.displayed.map((point) => ({ second: point.second, sendMbps: point.send, recvMbps: point.recv })));
+    }
+  });
+}
+
+function drawChartFrame(metrics) {
   const svgNS = 'http://www.w3.org/2000/svg';
   const grid = $('#chart-grid');
   const axis = $('#chart-axis');
@@ -780,7 +947,7 @@ async function openEditUser(user) {
   $('#edit-disabled').disabled = detail.id === 1;
   renderAgentCheckboxes('edit-agent-ids', detail.agentIds || []);
   syncAgentAccessRows();
-  $('#user-edit-dialog').showModal();
+  showDialog($('#user-edit-dialog'));
 }
 
 async function openProfileDialog() {
@@ -800,7 +967,7 @@ async function openProfileDialog() {
   $('#profile-telegram-status').textContent = binding ? `已绑定 @${binding.username || binding.telegramId}` : '未绑定';
   $('#generate-telegram-code').hidden = Boolean(binding);
   $('#unbind-telegram').hidden = !binding;
-  $('#profile-dialog').showModal();
+  showDialog($('#profile-dialog'), $('#open-profile'));
 }
 
 async function logout() {
@@ -826,6 +993,16 @@ $('#account-button').addEventListener('click', (event) => {
   const menu = $('#account-menu');
   menu.hidden = !menu.hidden;
   $('#account-button').setAttribute('aria-expanded', String(!menu.hidden));
+  if (!menu.hidden) {
+    menu.cancelAnim?.();
+    menu.cancelAnim = spring({
+      from: 0,
+      to: 1,
+      response: 0.28,
+      onUpdate: (v) => { menu.style.opacity = v; menu.style.transform = `translateY(${6 * (1 - v)}px) scale(${0.94 + 0.06 * v})`; },
+      onComplete: () => { menu.style.opacity = ''; menu.style.transform = ''; }
+    });
+  }
 });
 $('#open-profile').addEventListener('click', openProfileDialog);
 document.addEventListener('click', (event) => {
@@ -1006,7 +1183,7 @@ $('#cancel-trace').addEventListener('click', async () => {
 });
 $('#refresh-traces').addEventListener('click', () => loadTraces().catch((error) => toast(error.message)));
 
-$('#add-agent').addEventListener('click', () => $('#agent-dialog').showModal());
+$('#add-agent').addEventListener('click', (event) => showDialog($('#agent-dialog'), event.currentTarget));
 $('#agent-form').addEventListener('submit', async (event) => {
   event.preventDefault();
   const form = event.currentTarget;
@@ -1028,11 +1205,11 @@ $$('.copy-command').forEach((node) => node.addEventListener('click', async () =>
 }));
 
 $$('.picker-action').forEach((node) => node.addEventListener('click', () => pickerAction(node.dataset.picker, node.dataset.action)));
-$('#add-user').addEventListener('click', () => {
+$('#add-user').addEventListener('click', (event) => {
   $('#user-form').reset();
   renderAgentCheckboxes('new-agent-ids', []);
   syncAgentAccessRows();
-  $('#user-dialog').showModal();
+  showDialog($('#user-dialog'), event.currentTarget);
 });
 $('#new-role').addEventListener('change', syncAgentAccessRows);
 $('#edit-role').addEventListener('change', syncAgentAccessRows);

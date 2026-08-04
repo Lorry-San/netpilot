@@ -306,7 +306,7 @@ function resultText(view, test) {
 }
 
 async function sendHelp(chatId, replyToMessageId) {
-  await safeCall('sendMessage', { chat_id: chatId, text: '/help 查看命令帮助\n/status 查看授权与 Bot 状态\n/bind <网页生成的6位验证码>\n/agents 查看可用 Agent\n/iperf 交互设置 Agent、方向和目标\n/iperf <IP> [端口] [线程] [时长] [-R] 快捷测速\n/nexttrace [参数] <IP/域名> 路由追踪\n\nNextTrace 支持 -4/-6、-T/-U、-p、-q、-m、--timeout、--parallel-requests、--psize、-n、-e；输入命令后选择一个 Agent 即开始，不生成图片。\n\n直接输入 /iperf 时，先选择 Agent 和上/下行，再在 Bot 私聊输入 IP:端口。/iperf IP 默认上行；显式 -R 为下行。快捷模式默认端口 5201、线程 1、时长 10 秒。\n\n在群组中首次使用会自动登记。私有模式仅响应已绑定用户；管理员可在网页将群组设为公共模式。', parse_mode: 'HTML', ...replyTo(replyToMessageId) });
+  await safeCall('sendMessage', { chat_id: chatId, text: '/help 查看命令帮助\n/status 查看授权与 Bot 状态\n/bind <网页生成的6位验证码>\n/agents 查看可用 Agent\n/iperf 交互设置 Agent、方向和目标\n/iperf <IP> [端口] [线程] [时长] [-R] 快捷测速\n/nexttrace [参数] <IP/域名> 路由追踪\n\nNextTrace 支持 -4/-6、-T/-U、-p、-q、-m、--timeout、--parallel-requests、--psize、-n、-e；输入命令后选择一个 Agent 即开始，不生成图片。\n\n直接输入 /iperf 时，先选择 Agent 和上/下行，再在 Bot 私聊输入 IP:端口。/iperf IP 默认上行；显式 -R 为下行。快捷模式默认端口 5201、线程 1、时长 10 秒。\n\n在群组中首次使用会自动登记。私有模式仅响应已绑定用户；管理员可在网页将群组设为公共模式。', ...replyTo(replyToMessageId) });
 }
 
 async function sendStatus(chatId, user, chat, replyToMessageId) {

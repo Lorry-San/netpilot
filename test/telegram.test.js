@@ -540,3 +540,58 @@ test('Telegram chart PNG keeps labels when the host has no fonts', async () => {
   assert.notEqual(Buffer.compare(bundled, fontless), 0, 'bundled font render must draw glyphs a fontless render cannot');
   assert.ok(bundled.length > fontless.length, 'labeled chart must produce more pixels than the textless blank chart');
 });
+
+// /help used parse_mode HTML with unescaped angle-bracket placeholders, so
+// Telegram rejected it with "Can't parse entities" and safeCall swallowed the
+// error: help produced no output in groups and private chats alike. Guard both
+// the reply path and the entity-safety invariant for every HTML message.
+const SUPPORTED_TELEGRAM_TAGS = new Set(['b', 'strong', 'i', 'em', 'u', 'ins', 's', 'strike', 'del', 'a', 'code', 'pre', 'tg-spoiler', 'blockquote']);
+function assertTelegramEntitiesSafe(body) {
+  if (body.parse_mode !== 'HTML') return;
+  assert.doesNotMatch(body.text, /<(?![a-zA-Z/])/, 'HTML message must not contain raw unescaped angle-bracket placeholders');
+  for (const match of body.text.matchAll(/<\s*\/?\s*([a-zA-Z][a-zA-Z0-9-]*)/g)) {
+    assert.ok(SUPPORTED_TELEGRAM_TAGS.has(match[1].toLowerCase()), `unsupported tag <${match[1]}> in HTML message`);
+  }
+}
+
+test('Telegram /help replies in an authorized group with entity-safe text', async () => {
+  const originalApi = globalThis.netpilotServerApi;
+  const originalFetch = globalThis.fetch;
+  const requests = [];
+  globalThis.netpilotServerApi = {
+    db: {
+      get(sql) {
+        if (sql.includes('FROM telegram_users')) return { id: 1, username: 'admin', displayName: 'System Admin', role: 'admin', disabled: 0, telegramId: 7, telegramUsername: 'admin' };
+        if (sql.startsWith('SELECT * FROM telegram_groups')) return { chat_id: -1001, title: 'Authorized Group', owner_user_id: 1, mode: 'members_only' };
+        if (sql.includes('COUNT(*)')) return { count: 1 };
+        return null;
+      },
+      all() { return []; },
+      run() {},
+      now() { return new Date().toISOString(); }
+    },
+    getSettings() { return { telegram_bot_token: '123456789:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA' }; }
+  };
+  globalThis.fetch = async (_url, options) => {
+    requests.push(JSON.parse(options.body));
+    return { ok: true, status: 200, async json() { return { ok: true, result: true }; } };
+  };
+
+  try {
+    const { telegramTest } = await import(`../src/telegram.js?help=${Date.now()}`);
+    const group = { id: -1001, type: 'group', title: 'Authorized Group' };
+
+    await telegramTest.handleMessage({ message_id: 20, from: { id: 7 }, chat: group, text: '/help' });
+    assert.equal(requests.length, 1, 'authorized group /help must produce exactly one reply');
+    assert.match(requests[0].text, /查看命令帮助/);
+    assert.match(requests[0].text, /\/bind/);
+    assertTelegramEntitiesSafe(requests[0]);
+
+    await telegramTest.handleMessage({ message_id: 21, from: { id: 7 }, chat: { id: 7, type: 'private' }, text: '/help' });
+    assert.equal(requests.length, 2, 'private /help must also reply');
+    assertTelegramEntitiesSafe(requests[1]);
+  } finally {
+    globalThis.netpilotServerApi = originalApi;
+    globalThis.fetch = originalFetch;
+  }
+});

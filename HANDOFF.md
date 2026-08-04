@@ -304,6 +304,7 @@ Agent 发出：`agent.info`、`agent.heartbeat`、`task.stdout/stderr/metric/don
 - 用户自己发送的 Telegram 命令原文无法由 Bot 修改；完全隐藏应先发 `/iperf`，目标在私聊输入。
 - 群组只处理本 Bot 的已注册命令；普通文字、回复 Bot 的闲聊、未知命令和发给其他 Bot 的命令全部忽略。
 - 命令过滤必须早于群组授权提示，否则普通群聊会反复触发“未授权”；这是 v0.1.22 修复的历史故障。
+- `safeCall` 会吞掉 Telegram 400 只打 `console.error`。任何 `parse_mode: 'HTML'` 的 Bot 文案，占位符必须转义或使用受支持标签，否则会静默失去回复；`/help` 曾因裸 `<...>` 占位符在 v0.2.1 失败。新增 HTML 文案必须过实体校验。
 
 ## 13. Agent 安装与更新
 

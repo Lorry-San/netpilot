@@ -9,9 +9,13 @@ const PAGE_SIZE = 4;
 const CHART_FONT_FAMILY = 'WenQuanYi Micro Hei';
 const chartFontPath = fileURLToPath(new URL('../assets/fonts/WenQuanYiMicroHei.ttc', import.meta.url));
 const REDACTED_IP = 'x.x.x.x';
-const COMMANDS = new Set(['/start', '/help', '/status', '/bind', '/agents', '/iperf', '/nexttrace']);
+const PROGRESS_INTERVAL_MS = 5000;
+const TELEGRAM_RETRY_LIMIT = 2;
+const COMMANDS = new Set(['/start', '/help', '/status', '/bind', '/agents', '/iperf', '/nexttrace', '/rei', '/ren']);
 const activeTests = new Map();
 const activeTraces = new Map();
+const lastIperfRuns = new Map();
+const lastNextTraceRuns = new Map();
 const bindFailures = new Map();
 let bot = null;
 let stopping = false;
@@ -39,12 +43,28 @@ async function call(method, body = {}) {
     signal: AbortSignal.timeout(45000)
   });
   const result = await response.json().catch(() => ({}));
-  if (!response.ok || !result.ok) throw new Error(result.description || `Telegram API ${response.status}`);
+  if (!response.ok || !result.ok) {
+    const error = new Error(result.description || `Telegram API ${response.status}`);
+    const retryAfter = Number(result.parameters?.retry_after);
+    error.retryAfterMs = Number.isFinite(retryAfter) && retryAfter >= 0 ? retryAfter * 1000 : null;
+    throw error;
+  }
   return result.result;
 }
 
-async function safeCall(method, body) {
-  try { return await call(method, body); } catch (error) { console.error(`[netpilot] telegram ${method}:`, error.message); return null; }
+async function safeCall(method, body, { retries = TELEGRAM_RETRY_LIMIT } = {}) {
+  for (let attempt = 0; attempt <= retries; attempt += 1) {
+    try { return await call(method, body); }
+    catch (error) {
+      if (Number.isFinite(error.retryAfterMs) && attempt < retries) {
+        await new Promise((resolve) => setTimeout(resolve, error.retryAfterMs + 250));
+        continue;
+      }
+      console.error(`[netpilot] telegram ${method}:`, error.message);
+      return null;
+    }
+  }
+  return null;
 }
 
 function replyTo(messageId) {
@@ -52,13 +72,21 @@ function replyTo(messageId) {
 }
 
 async function upload(method, fields, fileField, filename, bytes, contentType) {
-  const form = new FormData();
-  for (const [key, value] of Object.entries(fields)) form.set(key, value && typeof value === 'object' ? JSON.stringify(value) : String(value));
-  form.set(fileField, new Blob([bytes], { type: contentType }), filename);
-  const response = await fetch(telegramUrl(method), { method: 'POST', body: form, signal: AbortSignal.timeout(45000) });
-  const result = await response.json().catch(() => ({}));
-  if (!response.ok || !result.ok) throw new Error(result.description || `Telegram API ${response.status}`);
-  return result.result;
+  for (let attempt = 0; attempt <= TELEGRAM_RETRY_LIMIT; attempt += 1) {
+    const form = new FormData();
+    for (const [key, value] of Object.entries(fields)) form.set(key, value && typeof value === 'object' ? JSON.stringify(value) : String(value));
+    form.set(fileField, new Blob([bytes], { type: contentType }), filename);
+    const response = await fetch(telegramUrl(method), { method: 'POST', body: form, signal: AbortSignal.timeout(45000) });
+    const result = await response.json().catch(() => ({}));
+    if (response.ok && result.ok) return result.result;
+    const retryAfter = Number(result.parameters?.retry_after);
+    if (Number.isFinite(retryAfter) && retryAfter >= 0 && attempt < TELEGRAM_RETRY_LIMIT) {
+      await new Promise((resolve) => setTimeout(resolve, retryAfter * 1000 + 250));
+      continue;
+    }
+    throw new Error(result.description || `Telegram API ${response.status}`);
+  }
+  return null;
 }
 
 function esc(value) {
@@ -140,6 +168,74 @@ function accessibleAgents(user, capability = '') {
 
 function makeId(prefix = 'tg') {
   return `${prefix}_${createHash('sha256').update(`${Date.now()}-${Math.random()}`).digest('hex').slice(0, 18)}`;
+}
+
+function repeatKey(chatId, telegramId) {
+  return `${String(chatId)}:${Number(telegramId)}`;
+}
+
+function persistRecentRun(chatId, telegramId, kind, params) {
+  try {
+    db.run(`INSERT INTO telegram_recent_runs (chat_id, telegram_id, kind, params_json, updated_at)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(chat_id, telegram_id, kind) DO UPDATE SET params_json = excluded.params_json, updated_at = excluded.updated_at`,
+    chatId, telegramId, kind, JSON.stringify(params), db.now());
+  } catch (error) {
+    console.error('[netpilot] telegram recent run:', error.message);
+  }
+}
+
+function loadRecentRun(cache, chatId, telegramId, kind) {
+  const key = repeatKey(chatId, telegramId);
+  const cached = cache.get(key);
+  if (cached) return cached;
+  try {
+    const row = db.get('SELECT params_json FROM telegram_recent_runs WHERE chat_id = ? AND telegram_id = ? AND kind = ?', chatId, telegramId, kind);
+    if (!row) return null;
+    const parsed = JSON.parse(row.params_json || '{}');
+    cache.set(key, parsed);
+    return parsed;
+  } catch (error) {
+    console.error('[netpilot] telegram recent run:', error.message);
+    return null;
+  }
+}
+
+function rememberIperfRun(test) {
+  const params = {
+    target: test.target,
+    port: test.port,
+    parallel: test.parallel,
+    duration: test.duration,
+    reverse: Boolean(test.reverse),
+    protocol: test.protocol || 'tcp',
+    bandwidth: test.bandwidth || '',
+    agentIds: test.selectedAgents.map((agent) => agent.id)
+  };
+  lastIperfRuns.set(repeatKey(test.chatId, test.telegramId), params);
+  persistRecentRun(test.chatId, test.telegramId, 'iperf', params);
+}
+
+function rememberNextTraceRun(trace) {
+  const params = {
+    params: { ...trace.params },
+    agentId: trace.agent?.id || ''
+  };
+  lastNextTraceRuns.set(repeatKey(trace.chatId, trace.telegramId), params);
+  persistRecentRun(trace.chatId, trace.telegramId, 'nexttrace', params);
+}
+
+async function removeProgressMessage(chatId, messageId, fallbackText, replyMarkup) {
+  if (!messageId) return;
+  const deleted = await safeCall('deleteMessage', { chat_id: chatId, message_id: messageId });
+  if (!deleted && fallbackText) {
+    await safeCall('editMessageText', {
+      chat_id: chatId,
+      message_id: messageId,
+      text: fallbackText,
+      ...(replyMarkup ? { reply_markup: replyMarkup } : {}),
+    });
+  }
 }
 
 function selectionKeyboard(test) {
@@ -243,6 +339,30 @@ function chartSvg(metrics = [], options = {}) {
   return `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}"><rect width="100%" height="100%" fill="#fff"/><text x="${left}" y="27" font-family="sans-serif" font-size="20" font-weight="700" fill="#17242c">${esc(options.title || 'NetPilot speed / time')}</text><g font-family="sans-serif">${legend}${yTicks}${xTicks}<line x1="${left}" y1="${top}" x2="${left}" y2="${top + plotH}" stroke="#33434d" stroke-width="2"/><line x1="${left}" y1="${top + plotH}" x2="${left + plotW}" y2="${top + plotH}" stroke="#33434d" stroke-width="2"/><text x="22" y="${top + plotH / 2}" text-anchor="middle" font-size="16" font-weight="600" fill="#17242c" transform="rotate(-90 22 ${top + plotH / 2})">Speed (Mbps)</text><text x="${left + plotW / 2}" y="${height - 18}" text-anchor="middle" font-size="16" font-weight="600" fill="#17242c">Time (s)</text>${renderedSeries}</g></svg>`;
 }
 
+function normalizeIperfMetrics(metrics = [], duration = 0, parallel = 1) {
+  const bySecond = new Map();
+  for (const metric of metrics) {
+    const second = Number(metric.second);
+    if (!Number.isFinite(second) || second < 0 || (duration > 0 && second > duration + 0.05)) continue;
+    const key = second.toFixed(3);
+    const current = bySecond.get(key);
+    const rate = Math.max(Number(metric.sendMbps || 0), Number(metric.recvMbps || 0));
+    const currentRate = current ? Math.max(Number(current.sendMbps || 0), Number(current.recvMbps || 0)) : -1;
+    if (!current || (parallel > 1 && rate > currentRate)) bySecond.set(key, { ...metric, second });
+  }
+  return [...bySecond.values()].sort((a, b) => a.second - b.second);
+}
+
+function iperfReceiverAverageMbps(output = []) {
+  const lines = output.map((item) => String(item?.line ?? item));
+  const match = [...lines].reverse().map((line) => line.match(/([0-9]+(?:\.[0-9]+)?)\s+([KMG])bits\/sec.*\breceiver\s*$/i)).find(Boolean);
+  if (!match) return null;
+  let value = Number(match[1]);
+  if (match[2].toUpperCase() === 'K') value /= 1000;
+  else if (match[2].toUpperCase() === 'G') value *= 1000;
+  return value;
+}
+
 function elapsedMs(start, end = Date.now()) {
   const startMs = new Date(start).getTime();
   const endMs = new Date(end).getTime();
@@ -261,7 +381,7 @@ function formatTimestamp(value) {
 }
 
 function iperfChartSvg(view, test) {
-  return chartSvg(view.metrics, { title: `${view.agentName} - ${iperfDisplayTarget(test, view.target)}:${view.port}` });
+  return chartSvg(normalizeIperfMetrics(view.metrics, view.duration, view.parallel), { title: `${view.agentName} - ${iperfDisplayTarget(test, view.target)}:${view.port}` });
 }
 
 // The production image ships no system fonts, and resvg drops text it cannot
@@ -281,10 +401,11 @@ function chartResvgOptions(width, { systemFonts = true } = {}) {
 }
 
 async function sendChart(chatId, view, batchStartedAt, replyToMessageId, test) {
-  if (!view.metrics.length) return false;
+  const metrics = normalizeIperfMetrics(view.metrics, view.duration, view.parallel);
+  if (!metrics.length) return false;
   const svg = iperfChartSvg(view, test);
   try {
-    const png = new Resvg(svg, chartResvgOptions(Math.min(2400, Math.max(1440, view.metrics.length * 100)))).render().asPng();
+    const png = new Resvg(svg, chartResvgOptions(Math.min(2400, Math.max(1440, metrics.length * 100)))).render().asPng();
     const timestamp = new Date(view.finishedAt || Date.now()).toISOString().replaceAll(':', '-').replace(/\.\d{3}Z$/, 'Z');
     const caption = `速度 / 时间曲线\nAgent：${view.agentName}\n测试耗时：${formatDuration(elapsedMs(view.createdAt, view.finishedAt))}\n当前总耗时：${formatDuration(elapsedMs(batchStartedAt, view.finishedAt || Date.now()))}`;
     await upload('sendDocument', { chat_id: chatId, caption, ...replyTo(replyToMessageId) }, 'document', `netpilot-${timestamp}.png`, png, 'image/png');
@@ -297,16 +418,17 @@ async function sendChart(chatId, view, batchStartedAt, replyToMessageId, test) {
 
 function resultText(view, test) {
   const status = view.status === 'completed' ? '完成' : view.status === 'cancelled' ? '已取消' : '失败';
-  const last = view.metrics.at(-1);
+  const last = normalizeIperfMetrics(view.metrics, view.duration, view.parallel).at(-1);
   const rate = Number(last?.sendMbps || last?.recvMbps || 0).toFixed(2);
+  const receiverAverage = iperfReceiverAverageMbps(view.output);
   const raw = redactIperfTargetText(view.output.map((line) => line.line).join('\n'), test, view.target);
   const tail = raw.length > 3200 ? `…${raw.slice(-3200)}` : raw;
   const duration = formatDuration(elapsedMs(view.createdAt, view.finishedAt));
-  return `测试${status}\nAgent：${esc(view.agentName)}\n目标：${esc(iperfDisplayTarget(test, view.target))}:${view.port}\n协议：${view.protocol.toUpperCase()}${view.reverse ? ' -R' : ''}\n设定时长：${view.duration}s\n测试耗时：${duration}\n完成时间：${formatTimestamp(view.finishedAt)}\n末速：${rate} Mbps\n\n<blockquote expandable>${esc(tail || '无原始输出')}</blockquote>`;
+  return `测试${status}\nAgent：${esc(view.agentName)}\n目标：${esc(iperfDisplayTarget(test, view.target))}:${view.port}\n协议：${view.protocol.toUpperCase()}${view.reverse ? ' -R' : ''}\n设定时长：${view.duration}s\n测试耗时：${duration}\n完成时间：${formatTimestamp(view.finishedAt)}\n末速：${rate} Mbps${receiverAverage === null ? '' : `\n平均速度（receiver）：${receiverAverage.toFixed(2)} Mbps`}\n\n<blockquote expandable>${esc(tail || '无原始输出')}</blockquote>`;
 }
 
 async function sendHelp(chatId, replyToMessageId) {
-  await safeCall('sendMessage', { chat_id: chatId, text: '/help 查看命令帮助\n/status 查看授权与 Bot 状态\n/bind <网页生成的6位验证码>\n/agents 查看可用 Agent\n/iperf 交互设置 Agent、方向和目标\n/iperf <IP> [端口] [线程] [时长] [-R] 快捷测速\n/nexttrace [参数] <IP/域名> 路由追踪\n\nNextTrace 支持 -4/-6、-T/-U、-p、-q、-m、--timeout、--parallel-requests、--psize、-n、-e；输入命令后选择一个 Agent 即开始，不生成图片。\n\n直接输入 /iperf 时，先选择 Agent 和上/下行，再在 Bot 私聊输入 IP:端口。/iperf IP 默认上行；显式 -R 为下行。快捷模式默认端口 5201、线程 1、时长 10 秒。\n\n在群组中首次使用会自动登记。私有模式仅响应已绑定用户；管理员可在网页将群组设为公共模式。', ...replyTo(replyToMessageId) });
+  await safeCall('sendMessage', { chat_id: chatId, text: '/help 查看命令帮助\n/status 查看授权与 Bot 状态\n/bind <网页生成的6位验证码>\n/agents 查看可用 Agent\n/iperf 交互设置 Agent、方向和目标\n/iperf <IP> [端口] [线程] [时长] [-R] 快捷测速\n/nexttrace [参数] <IP/域名> 路由追踪\n/rei 按相同参数重测最近一次 iperf\n/ren 按相同参数重测最近一次 NextTrace\n\nNextTrace 支持 -4/-6、-T/-U、-p、-q、-m、--timeout、--parallel-requests、--psize、-n、-e；输入命令后选择一个 Agent 即开始，不生成图片。\n\n直接输入 /iperf 时，先选择 Agent 和上/下行，再在 Bot 私聊输入 IP:端口。/iperf IP 默认上行；显式 -R 为下行。快捷模式默认端口 5201、线程 1、时长 10 秒。\n\n在群组中首次使用会自动登记。私有模式仅响应已绑定用户；管理员可在网页将群组设为公共模式。', ...replyTo(replyToMessageId) });
 }
 
 async function sendStatus(chatId, user, chat, replyToMessageId) {
@@ -398,6 +520,29 @@ function traceProgressKeyboard(trace) {
 
 function traceCommandSummary(params) {
   return `${params.protocol.toUpperCase()}${params.port ? `:${params.port}` : ''} · ${params.addressFamily === 'auto' ? '自动地址族' : params.addressFamily.toUpperCase()} · ${params.queries} 次/跳 · ${params.maxHops} 跳 · ${params.packetSize ? `${params.packetSize} 字节` : '默认包大小'}`;
+}
+
+async function beginTraceRun(trace, agent, queryId = null) {
+  try {
+    const task = api.createTrace(trace.user, { ...trace.params, agentId: agent.id });
+    trace.agent = agent;
+    trace.currentTaskId = task.id;
+    trace.startedAt = Date.now();
+    trace.state = 'running';
+    trace.completedTaskIds = trace.completedTaskIds || new Set();
+    rememberNextTraceRun(trace);
+    api.audit(trace.user.id, 'trace.create.telegram', task.id, { agentId: agent.id, target: trace.params.target, chatId: trace.chatId });
+    if (queryId) await safeCall('answerCallbackQuery', { callback_query_id: queryId, text: '路由追踪已开始' });
+    await renderTraceProgress(trace, true);
+    const timer = setInterval(() => renderTraceProgress(trace), PROGRESS_INTERVAL_MS);
+    timer.unref?.();
+    trace.timer = timer;
+    return true;
+  } catch (error) {
+    if (queryId) await safeCall('answerCallbackQuery', { callback_query_id: queryId, text: error.message, show_alert: true });
+    else await safeCall('sendMessage', { chat_id: trace.chatId, text: `重测失败：${error.message}`, ...replyTo(trace.replyToMessageId) });
+    return false;
+  }
 }
 
 async function startTraceFromTelegram(chat, telegramId, user, args, replyToMessageId) {
@@ -538,28 +683,35 @@ function progressText(test) {
 }
 
 async function renderProgress(test, force = false) {
-  if (test.state !== 'running') return;
+  if (test.state !== 'running' || test.completing || test.rendering) return;
+  if (!force && test.lastProgressAt && Date.now() - test.lastProgressAt < PROGRESS_INTERVAL_MS) return;
   const text = progressText(test);
   if (!force && text === test.lastProgressText) return;
-  test.lastProgressText = text;
-  await safeCall('editMessageText', { chat_id: test.chatId, message_id: test.messageId, text, reply_markup: progressKeyboard(test) });
+  test.rendering = true;
+  try {
+    const result = await safeCall('editMessageText', { chat_id: test.chatId, message_id: test.messageId, text, reply_markup: progressKeyboard(test) }, { retries: 0 });
+    if (result) {
+      test.lastProgressText = text;
+      test.lastProgressAt = Date.now();
+    }
+  } finally {
+    test.rendering = false;
+  }
 }
 
 async function finalizeBatch(test) {
   if (test.state === 'finished') return;
   test.state = 'finished';
   clearInterval(test.timer);
+  rememberIperfRun(test);
   const totalElapsed = elapsedMs(test.startedAt);
   const testElapsed = test.results.reduce((sum, item) => sum + item.elapsed, 0);
   const successful = test.results.filter((item) => item.status === 'completed').length;
   const failed = test.results.length - successful + test.errors.length;
   const title = test.stopRequested ? '测试已中止' : '全部测试已结束';
   const errorText = test.errors.length ? `\n未完成：${redactIperfTargetText(test.errors.map((item) => `${item.agent.name}（${item.error}）`).join('；'), test).slice(0, 2500)}` : '';
-  await safeCall('editMessageText', {
-    chat_id: test.chatId,
-    message_id: test.messageId,
-    text: `${title}\n完成：${processedCount(test)}/${test.selectedAgents.length}\n成功：${successful}，失败/取消：${failed}\n⏱ 测试耗时：${formatDuration(testElapsed)}\n⏱ 总体耗时：${formatDuration(totalElapsed)}\n完成时间：${formatTimestamp(Date.now())}${errorText}`
-  });
+  const summaryText = `${title}\n完成：${processedCount(test)}/${test.selectedAgents.length}\n成功：${successful}，失败/取消：${failed}\n⏱ 测试耗时：${formatDuration(testElapsed)}\n⏱ 总体耗时：${formatDuration(totalElapsed)}\n完成时间：${formatTimestamp(Date.now())}${errorText}`;
+  await removeProgressMessage(test.chatId, test.messageId, summaryText);
   activeTests.delete(test.id);
 }
 
@@ -604,7 +756,7 @@ async function beginSelectedTest(test) {
     test.queryId = null;
   }
   await renderProgress(test, true);
-  const timer = setInterval(() => renderProgress(test), 2000);
+  const timer = setInterval(() => renderProgress(test), PROGRESS_INTERVAL_MS);
   timer.unref?.();
   test.timer = timer;
   await startNextAgent(test);
@@ -638,24 +790,39 @@ async function finishTest(test) {
 async function completeTelegramTask(task, view) {
   const test = [...activeTests.values()].find((item) => item.currentTaskId === task.id);
   if (!test) return;
+  test.completedTaskIds = test.completedTaskIds || new Set();
+  if (test.completedTaskIds.has(task.id)) return;
+  test.completedTaskIds.add(task.id);
+  test.completing = true;
   const itemElapsed = elapsedMs(view.createdAt, view.finishedAt);
   test.results.push({ agent: test.currentAgent, status: view.status, elapsed: itemElapsed });
+  rememberIperfRun(test);
   await safeCall('sendMessage', { chat_id: test.chatId, text: resultText(view, test), parse_mode: 'HTML', ...replyTo(test.replyToMessageId) });
   await sendChart(test.chatId, view, test.startedAt, test.replyToMessageId, test);
   test.currentTaskId = null;
   test.currentAgent = null;
+  test.completing = false;
   if (test.stopRequested) return finalizeBatch(test);
   await startNextAgent(test);
 }
 
 async function renderTraceProgress(trace, force = false) {
-  if (trace.state !== 'running' || !trace.currentTaskId) return;
+  if (trace.state !== 'running' || !trace.currentTaskId || trace.completing || trace.rendering) return;
+  if (!force && trace.lastProgressAt && Date.now() - trace.lastProgressAt < PROGRESS_INTERVAL_MS) return;
   const outputCount = Number(db.get('SELECT COUNT(*) AS count FROM trace_output WHERE trace_id = ?', trace.currentTaskId)?.count || 0);
   const hopCount = Number(db.get('SELECT COUNT(*) AS count FROM trace_hops WHERE trace_id = ?', trace.currentTaskId)?.count || 0);
   const text = `NextTrace 正在运行\nAgent：${trace.agent.name}\n目标：${trace.params.target}\n参数：${traceCommandSummary(trace.params)}\n已收到：${hopCount} 跳，${outputCount} 行输出\n已用时间：${formatDuration(elapsedMs(trace.startedAt))}`;
   if (!force && text === trace.lastProgressText) return;
-  trace.lastProgressText = text;
-  await safeCall('editMessageText', { chat_id: trace.chatId, message_id: trace.messageId, text, reply_markup: traceProgressKeyboard(trace) });
+  trace.rendering = true;
+  try {
+    const result = await safeCall('editMessageText', { chat_id: trace.chatId, message_id: trace.messageId, text, reply_markup: traceProgressKeyboard(trace) }, { retries: 0 });
+    if (result) {
+      trace.lastProgressText = text;
+      trace.lastProgressAt = Date.now();
+    }
+  } finally {
+    trace.rendering = false;
+  }
 }
 
 function traceResultText(view) {
@@ -675,13 +842,12 @@ function traceProtocolText(view) {
 async function completeTelegramTrace(task, view) {
   const trace = [...activeTraces.values()].find((item) => item.currentTaskId === task.id);
   if (!trace) return;
+  trace.completedTaskIds = trace.completedTaskIds || new Set();
+  if (trace.completedTaskIds.has(task.id)) return;
+  trace.completedTaskIds.add(task.id);
   trace.state = 'finished';
+  trace.completing = true;
   clearInterval(trace.timer);
-  await safeCall('editMessageText', {
-    chat_id: trace.chatId,
-    message_id: trace.messageId,
-    text: `NextTrace ${view.status === 'completed' ? '已完成' : view.status === 'cancelled' ? '已取消' : '失败'}\nAgent：${view.agentName}\n目标：${view.target}\n耗时：${formatDuration(elapsedMs(view.createdAt, view.finishedAt))}`
-  });
   await safeCall('sendMessage', { chat_id: trace.chatId, text: traceResultText(view), parse_mode: 'HTML', ...replyTo(trace.replyToMessageId) });
   const raw = view.output.map((line) => line.line).join('\n');
   if (raw.length > 3000) {
@@ -692,6 +858,11 @@ async function completeTelegramTrace(task, view) {
       console.error('[netpilot] telegram trace output:', error.message);
     }
   }
+  await removeProgressMessage(
+    trace.chatId,
+    trace.messageId,
+    `NextTrace ${view.status === 'completed' ? '已完成' : view.status === 'cancelled' ? '已取消' : '失败'}\nAgent：${view.agentName}\n目标：${view.target}\n耗时：${formatDuration(elapsedMs(view.createdAt, view.finishedAt))}`
+  );
   activeTraces.delete(trace.id);
 }
 
@@ -715,21 +886,7 @@ async function traceCallbackQuery(query, data) {
   } else if (action === 'run' && trace.state === 'selecting') {
     const agent = trace.agents.find((item) => item.id === data[3]);
     if (!agent) return safeCall('answerCallbackQuery', { callback_query_id: query.id, text: 'Agent 不可用', show_alert: true });
-    try {
-      const task = api.createTrace(trace.user, { ...trace.params, agentId: agent.id });
-      trace.agent = agent;
-      trace.currentTaskId = task.id;
-      trace.startedAt = Date.now();
-      trace.state = 'running';
-      api.audit(trace.user.id, 'trace.create.telegram', task.id, { agentId: agent.id, target: trace.params.target, chatId: trace.chatId });
-      await safeCall('answerCallbackQuery', { callback_query_id: query.id, text: '路由追踪已开始' });
-      await renderTraceProgress(trace, true);
-      const timer = setInterval(() => renderTraceProgress(trace), 2000);
-      timer.unref?.();
-      trace.timer = timer;
-    } catch (error) {
-      await safeCall('answerCallbackQuery', { callback_query_id: query.id, text: error.message, show_alert: true });
-    }
+    await beginTraceRun(trace, agent, query.id);
   } else if (action === 'stop' && trace.state === 'running') {
     await safeCall('answerCallbackQuery', { callback_query_id: query.id, text: '正在中止路由追踪' });
     try { api.cancelTrace(trace.user, trace.currentTaskId); } catch (error) { await safeCall('sendMessage', { chat_id: trace.chatId, text: `中止失败：${error.message}`, ...replyTo(trace.replyToMessageId) }); }
@@ -942,6 +1099,66 @@ async function handleMessage(message) {
   }
   if (command === '/iperf') return startTestFromTelegram(chat, from.id, user, parts.slice(1), message.message_id);
   if (command === '/nexttrace') return startTraceFromTelegram(chat, from.id, user, parts.slice(1), message.message_id);
+  if (command === '/rei') return repeatIperf(chat, from.id, user, message.message_id);
+  if (command === '/ren') return repeatNextTrace(chat, from.id, user, message.message_id);
+}
+
+async function repeatIperf(chat, telegramId, user, replyToMessageId) {
+  const last = loadRecentRun(lastIperfRuns, chat.id, telegramId, 'iperf');
+  if (!last) {
+    await safeCall('sendMessage', { chat_id: chat.id, text: '没有可重测的 iperf 记录，请先完成一次 iperf 测试。', ...replyTo(replyToMessageId) });
+    return;
+  }
+  const agents = accessibleAgents(user);
+  const agentIds = Array.isArray(last.agentIds) ? last.agentIds.map(String) : [];
+  const availableAgents = agentIds.map((agentId) => agents.find((agent) => agent.id === agentId)).filter(Boolean);
+  if (!agentIds.length || availableAgents.length !== agentIds.length) {
+    await safeCall('sendMessage', { chat_id: chat.id, text: '上次使用的 Agent 有离线或已无权限，无法按原配置重测。', ...replyTo(replyToMessageId) });
+    return;
+  }
+  const id = makeId();
+  const test = {
+    id, chatId: chat.id, chatType: chat.type, telegramId, user, publicChatId: user.publicChatId || null,
+    target: last.target, port: last.port, parallel: last.parallel, duration: last.duration, reverse: last.reverse,
+    directionRequired: false, targetRequired: false,
+    redactTarget: shouldRedactIperfTarget(chat, user),
+    replyToMessageId, agents: availableAgents, selected: new Set(agentIds), selectedAgents: availableAgents,
+    page: 0, state: 'selecting', createdAt: Date.now()
+  };
+  activeTests.set(id, test);
+  const message = await safeCall('sendMessage', {
+    chat_id: chat.id,
+    text: `按上次参数重测\n目标：${iperfDisplayTarget(test)}:${test.port}，${test.parallel} 线程，${test.duration} 秒${test.reverse ? '，下行测试 (-R)' : '，上行测试'}\nAgent：${availableAgents.map((a) => a.name).join('、')}`,
+    ...replyTo(replyToMessageId)
+  });
+  test.messageId = message?.message_id;
+  if (!test.messageId) { activeTests.delete(id); return; }
+  await beginSelectedTest(test);
+}
+
+async function repeatNextTrace(chat, telegramId, user, replyToMessageId) {
+  const last = loadRecentRun(lastNextTraceRuns, chat.id, telegramId, 'nexttrace');
+  if (!last) {
+    await safeCall('sendMessage', { chat_id: chat.id, text: '没有可重测的 NextTrace 记录，请先完成一次 NextTrace 测试。', ...replyTo(replyToMessageId) });
+    return;
+  }
+  const agents = accessibleAgents(user, 'nexttrace');
+  const agent = last.agentId ? agents.find((a) => a.id === last.agentId) : agents[0];
+  if (!agent) {
+    await safeCall('sendMessage', { chat_id: chat.id, text: '没有可用的支持 NextTrace 的 Agent。', ...replyTo(replyToMessageId) });
+    return;
+  }
+  const id = makeId('nt');
+  const trace = { id, chatId: chat.id, telegramId, user, publicChatId: user.publicChatId || null, replyToMessageId, params: { ...last.params }, agents: [agent], page: 0, state: 'selecting', createdAt: Date.now() };
+  activeTraces.set(id, trace);
+  const message = await safeCall('sendMessage', {
+    chat_id: chat.id,
+    text: `按上次参数重测 NextTrace\nAgent：${agent.name}\n目标：${last.params.target}\n参数：${traceCommandSummary(last.params)}`,
+    ...replyTo(replyToMessageId)
+  });
+  trace.messageId = message?.message_id;
+  if (!trace.messageId) { activeTraces.delete(id); return; }
+  if (!await beginTraceRun(trace, agent, null)) activeTraces.delete(id);
 }
 
 async function handleChatMember(update) {
@@ -982,7 +1199,10 @@ async function poll(generation, botToken) {
       if (updates.length) db.run(`INSERT INTO settings (key, value, updated_at) VALUES ('telegram_update_offset', ?, ?)
                                   ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`, String(offset), db.now());
     } catch (error) {
-      if (!stopping) { console.error('[netpilot] telegram polling:', error.message); await new Promise((resolve) => setTimeout(resolve, 3000)); }
+      if (!stopping) {
+        console.error('[netpilot] telegram polling:', error.message);
+        await new Promise((resolve) => setTimeout(resolve, Number.isFinite(error.retryAfterMs) ? error.retryAfterMs + 250 : 3000));
+      }
     }
   }
 }
@@ -1004,7 +1224,9 @@ export async function startTelegramBot() {
       { command: 'bind', description: '绑定网页账户' },
       { command: 'agents', description: '查看可用 Agent' },
       { command: 'iperf', description: '交互测速，或附带 IP 快捷上行' },
-      { command: 'nexttrace', description: '选择 Agent 执行路由追踪' }
+      { command: 'nexttrace', description: '选择 Agent 执行路由追踪' },
+      { command: 'rei', description: '按相同参数重测最近一次 iperf' },
+      { command: 'ren', description: '按相同参数重测最近一次 NextTrace' }
     ] });
   }
   globalThis.netpilotTelegramReload = async () => {
@@ -1025,4 +1247,4 @@ export async function startTelegramBot() {
   }
 }
 
-export const telegramTest = { activeTests, activeTraces, beginSelectedTest, callbackQuery, chartFontPath, chartResvgOptions, chartSvg, completeTelegramTask, completeTelegramTrace, directionKeyboard, finishTest, handleChatMember, handleMessage, iperfChartSvg, iperfDisplayTarget, parseIperfArgs, parseNextTraceArgs, parseTargetInput, privateTargetKeyboard, progressKeyboard, redactIperfTargetText, resultText, selectionKeyboard, traceSelectionKeyboard };
+export const telegramTest = { activeTests, activeTraces, beginSelectedTest, callbackQuery, chartFontPath, chartResvgOptions, chartSvg, completeTelegramTask, completeTelegramTrace, directionKeyboard, finishTest, handleChatMember, handleMessage, iperfChartSvg, iperfDisplayTarget, iperfReceiverAverageMbps, lastIperfRuns, lastNextTraceRuns, normalizeIperfMetrics, parseIperfArgs, parseNextTraceArgs, parseTargetInput, privateTargetKeyboard, progressKeyboard, redactIperfTargetText, repeatIperf, repeatNextTrace, resultText, selectionKeyboard, traceSelectionKeyboard };

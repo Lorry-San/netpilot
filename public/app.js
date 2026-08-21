@@ -208,9 +208,19 @@ function handleLiveMessage(message) {
     if (test) test.output.push({ stream: message.type === 'task.stderr' ? 'stderr' : 'stdout', line });
     if (state.activeTestId === taskId) appendOutput(line);
   } else if (message.type === 'task.metric') {
-    if (test) test.metrics.push(message.payload || {});
+    const metric = message.payload || {};
+    if (test) {
+      const second = Number(metric.second || 0);
+      const index = test.metrics.findIndex((item) => Math.abs(Number(item.second || 0) - second) < 0.0005);
+      if (index < 0) test.metrics.push(metric);
+      else {
+        const incomingRate = Math.max(Number(metric.sendMbps || 0), Number(metric.recvMbps || 0));
+        const existingRate = Math.max(Number(test.metrics[index].sendMbps || 0), Number(test.metrics[index].recvMbps || 0));
+        if (Number(test.parallel || 1) > 1 && incomingRate > existingRate) test.metrics[index] = metric;
+      }
+      test.metrics.sort((a, b) => Number(a.second || 0) - Number(b.second || 0));
+    }
     if (state.activeTestId === taskId && test) {
-      const metric = message.payload || {};
       $('#current-rate').textContent = `${Number(metric.sendMbps || metric.recvMbps || 0).toFixed(1)} Mbps`;
       drawChart(test.metrics);
     }

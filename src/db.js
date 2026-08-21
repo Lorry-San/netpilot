@@ -159,6 +159,14 @@ db.exec(`
     expires_at TEXT NOT NULL,
     created_at TEXT NOT NULL
   );
+  CREATE TABLE IF NOT EXISTS telegram_recent_runs (
+    chat_id INTEGER NOT NULL,
+    telegram_id INTEGER NOT NULL,
+    kind TEXT NOT NULL CHECK (kind IN ('iperf', 'nexttrace')),
+    params_json TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (chat_id, telegram_id, kind)
+  );
   CREATE TABLE IF NOT EXISTS audit_logs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id INTEGER REFERENCES users(id),

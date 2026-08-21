@@ -9,9 +9,9 @@
 | GitHub | `Lorry-San/netpilot` |
 | 默认分支 | `main` |
 | 许可证 | `AGPL-3.0-only` |
-| 交接版本 | `v0.2.1` |
-| 交接提交 | `v0.2.1` 标签指向的发布提交 |
-| 核对日期 | 2026-08-03（Asia/Shanghai） |
+| 交接版本 | `v0.2.2` |
+| 交接提交 | `v0.2.2` 标签指向的发布提交 |
+| 核对日期 | 2026-08-21（Asia/Shanghai） |
 | 生产站点 | `https://iperf.nbiepl.cloud` |
 | 生产主机 | `103.240.198.97` |
 | 服务端目录 | `/opt/netpilot` |
@@ -284,7 +284,7 @@ Agent 发出：`agent.info`、`agent.heartbeat`、`task.stdout/stderr/metric/don
 
 - uid=1 保存 Token 时用 `getMe` 验证；Node 启动后 long polling `getUpdates(timeout=35)`。
 - `telegram_update_offset` 持久化，单 Token 不得同时运行第二个 poller。
-- 启动注册 `/help`、`/status`、`/bind`、`/agents`、`/iperf`、`/nexttrace`。
+- 启动注册 `/help`、`/status`、`/bind`、`/agents`、`/iperf`、`/nexttrace`、`/rei`、`/ren`。
 - Web 生成 6 位、10 分钟绑定码；用户和 Telegram ID 均一对一。
 - `members_only` 使用调用者自己的权限；`all_members` 允许全群，未绑定者继承群主权限。
 - 普通用户最多登记一个群；只有管理员能设公共模式。
@@ -295,8 +295,12 @@ Agent 发出：`agent.info`、`agent.heartbeat`、`task.stdout/stderr/metric/don
 - `/iperf`：选 Agent、上/下行，再去私聊输入 `IP:端口`。
 - 多 Agent 严格串行，避免标准 iperf3 服务端一次只能接一个客户端。
 - `/nexttrace [安全参数] 目标`：选择一个支持 NextTrace 的 Agent。
+- `/rei`：从 SQLite 读取最近一次 iperf 的参数和 Agent 列表并立即串行重测。
+- `/ren`：从 SQLite 读取最近一次 NextTrace 的参数和 Agent 并立即重测。
 - 回调 data 包含发起者 Telegram ID；每次回调都要重新检查。
 - Bot 任务消息回复最初召唤命令，最终图作为文件发送。图表 SVG 含坐标轴、数据点数值和图例，栅格化时必须经 `chartResvgOptions` 加载内置字体，否则容器内文字全部丢失。
+- Telegram 进度最多每 5 秒编辑一次且禁止同任务并发编辑。关键结果、图表和消息删除遇到 `429 Too Many Requests` 时必须按 Telegram 的 `retry_after` 等待并重试；完成后删除进度消息。
+- iperf 曲线只保留测试时长内每个时间点的最大区间值，过滤 sender/receiver 汇总行。结果中的“末速”取最后一个有效区间，“平均速度（receiver）”从原始 receiver 汇总行提取。
 
 ### 私有群脱敏和群聊过滤
 

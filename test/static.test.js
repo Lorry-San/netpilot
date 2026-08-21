@@ -75,7 +75,9 @@ test('static assets and installer script are served', async (t) => {
   assert.match(indexHtml, /id="view-traces"/);
   assert.match(indexHtml, /id="trace-packet-size"/);
   assert.match(indexHtml, /id="setting-nexttrace-provider"/);
-  assert.match(indexHtml, /\/app\.js\?v=0\.2\.1/);
+  assert.match(indexHtml, /\/app\.js\?v=0\.2\.2/);
+  assert.match(indexHtml, /<code>\/rei<\/code>/);
+  assert.match(indexHtml, /<code>\/ren<\/code>/);
   assert.match(indexHtml, /class="bg-layer"/);
   assert.match(indexHtml, /id="nav-pill"/);
   assert.match(indexHtml, /id="generate-telegram-code"/);

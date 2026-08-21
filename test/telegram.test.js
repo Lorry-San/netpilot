@@ -64,6 +64,34 @@ test('Telegram picker binds callbacks to requester and rejects other users', asy
     assert.deepEqual(telegramTest.parseNextTraceArgs(['1.1.1.1']), { target: '1.1.1.1', addressFamily: 'auto', protocol: 'icmp', port: null, queries: 3, maxHops: 30, timeoutMs: 1000, parallelRequests: 18, packetSize: 0, reverseDns: true, mpls: true, mapTrace: false });
     assert.deepEqual(telegramTest.parseNextTraceArgs(['-T', '-p', '443', '-4', '-q', '5', '--psize=128', 'example.com']), { target: 'example.com', addressFamily: 'ipv4', protocol: 'tcp', port: 443, queries: 5, maxHops: 30, timeoutMs: 1000, parallelRequests: 18, packetSize: 128, reverseDns: true, mpls: true, mapTrace: false });
     assert.equal(telegramTest.parseNextTraceArgs(['--json', '1.1.1.1']), null);
+
+    const normalized = telegramTest.normalizeIperfMetrics([
+      { second: 9, sendMbps: 700, recvMbps: 700 },
+      { second: 10, sendMbps: 699, recvMbps: 699 },
+      { second: 10, sendMbps: 570, recvMbps: 570 },
+      { second: 10.2, sendMbps: 577, recvMbps: 577 }
+    ], 10);
+    assert.deepEqual(normalized.map((metric) => [metric.second, metric.sendMbps]), [[9, 700], [10, 699]]);
+    assert.deepEqual(telegramTest.normalizeIperfMetrics([
+      { second: 1, sendMbps: 168, recvMbps: 168 },
+      { second: 1, sendMbps: 336, recvMbps: 336 }
+    ], 10, 2).map((metric) => metric.sendMbps), [336]);
+    assert.equal(telegramTest.iperfReceiverAverageMbps([
+      { line: '[  5]   0.00-10.20  sec   701 MBytes   577 Mbits/sec    0 sender' },
+      { line: '[  5]   0.00-10.00  sec   679 MBytes   570 Mbits/sec receiver' }
+    ]), 570);
+    const result = telegramTest.resultText({
+      status: 'completed', agentName: 'Agent One', target: '198.51.100.1', port: 5201, protocol: 'tcp', reverse: true, duration: 10,
+      createdAt: new Date(Date.now() - 10000).toISOString(), finishedAt: new Date().toISOString(),
+      metrics: [...normalized, { second: 10.2, sendMbps: 577, recvMbps: 577 }],
+      output: [
+        { line: '[  5]   9.00-10.00  sec  83.4 MBytes   699 Mbits/sec' },
+        { line: '[  5]   0.00-10.20  sec   701 MBytes   577 Mbits/sec    0 sender' },
+        { line: '[  5]   0.00-10.00  sec   679 MBytes   570 Mbits/sec receiver' }
+      ]
+    }, { target: '198.51.100.1', redactTarget: false });
+    assert.match(result, /末速：699\.00 Mbps/);
+    assert.match(result, /平均速度（receiver）：570\.00 Mbps/);
   } finally {
     globalThis.netpilotServerApi = originalApi;
     globalThis.fetch = originalFetch;
@@ -154,6 +182,7 @@ test('Telegram multi-Agent tests run serially and upload charts as documents', a
     await telegramTest.completeTelegramTask({ id: 'task_2' }, completedView('Agent Two'));
     assert.equal(telegramTest.activeTests.has(pending.id), false);
     assert.equal(uploads.length, 2);
+    assert.ok(messages.some((request) => request.url.endsWith('/deleteMessage') && request.body.message_id === 7));
   } finally {
     if (telegramTest) {
       for (const pending of telegramTest.activeTests.values()) clearInterval(pending.timer);
@@ -415,6 +444,60 @@ test('Telegram no-argument and quick commands use distinct flows and reply to th
   }
 });
 
+test('Telegram /rei and /ren immediately repeat the last parameters and agents', async () => {
+  const originalApi = globalThis.netpilotServerApi;
+  const originalFetch = globalThis.fetch;
+  const createdTests = [];
+  const createdTraces = [];
+  let messageId = 100;
+  const agent = { id: 'agent_one', name: 'Agent One', status: 'online', capabilities: '["iperf3","nexttrace"]' };
+  globalThis.netpilotServerApi = {
+    db: {
+      get(sql) {
+        if (sql.includes('SELECT second')) return { second: 0 };
+        if (sql.includes('COUNT(*)')) return { count: 0 };
+        return null;
+      },
+      all() { return [agent]; },
+      run() {},
+      now() { return new Date().toISOString(); }
+    },
+    getSettings() { return { telegram_bot_token: '123456789:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA' }; },
+    createTest(_user, body) { createdTests.push(body); return { id: 'repeat_test', agent_id: body.agentId }; },
+    createTrace(_user, body) { createdTraces.push(body); return { id: 'repeat_trace', agent_id: body.agentId }; },
+    audit() {}
+  };
+  globalThis.fetch = async () => ({ ok: true, status: 200, async json() { messageId += 1; return { ok: true, result: { message_id: messageId } }; } });
+
+  let telegramTest;
+  try {
+    ({ telegramTest } = await import(`../src/telegram.js?repeat=${Date.now()}`));
+    const chat = { id: -1001, type: 'group', title: 'Repeat Group' };
+    const user = { id: 2, role: 'user' };
+    telegramTest.lastIperfRuns.set('-1001:42', { target: '198.51.100.1', port: 5202, parallel: 2, duration: 15, reverse: true, agentIds: ['agent_one'] });
+    await telegramTest.repeatIperf(chat, 42, user, 800);
+    assert.deepEqual(createdTests[0], { agentId: 'agent_one', target: '198.51.100.1', port: 5202, parallel: 2, duration: 15, protocol: 'tcp', reverse: true });
+    assert.equal([...telegramTest.activeTests.values()][0].state, 'running');
+
+    const traceParams = { target: 'example.com', addressFamily: 'ipv4', protocol: 'tcp', port: 443, queries: 3, maxHops: 30, timeoutMs: 1000, parallelRequests: 18, packetSize: 64, reverseDns: true, mpls: true, mapTrace: false };
+    telegramTest.lastNextTraceRuns.set('-1001:42', { params: traceParams, agentId: 'agent_one' });
+    await telegramTest.repeatNextTrace(chat, 42, user, 801);
+    assert.deepEqual(createdTraces[0], { ...traceParams, agentId: 'agent_one' });
+    assert.equal([...telegramTest.activeTraces.values()][0].state, 'running');
+  } finally {
+    if (telegramTest) {
+      for (const pending of telegramTest.activeTests.values()) clearInterval(pending.timer);
+      for (const pending of telegramTest.activeTraces.values()) clearInterval(pending.timer);
+      telegramTest.activeTests.clear();
+      telegramTest.activeTraces.clear();
+      telegramTest.lastIperfRuns.clear();
+      telegramTest.lastNextTraceRuns.clear();
+    }
+    globalThis.netpilotServerApi = originalApi;
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test('Telegram rejects unbound private messages and permits public-group members', async () => {
   const originalApi = globalThis.netpilotServerApi;
   const originalFetch = globalThis.fetch;
@@ -481,6 +564,41 @@ test('Telegram rejects unbound private messages and permits public-group members
   }
 });
 
+test('Telegram retries critical messages after API rate limiting', async () => {
+  const originalApi = globalThis.netpilotServerApi;
+  const originalFetch = globalThis.fetch;
+  let sendAttempts = 0;
+  globalThis.netpilotServerApi = {
+    db: {
+      get(sql) {
+        if (sql.includes('FROM telegram_users')) return { id: 2, username: 'user', displayName: 'User', role: 'user', disabled: 0 };
+        if (sql.includes('COUNT(*)')) return { count: 0 };
+        return null;
+      },
+      all() { return []; },
+      run() {},
+      now() { return new Date().toISOString(); }
+    },
+    getSettings() { return { telegram_bot_token: '123456789:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA' }; }
+  };
+  globalThis.fetch = async (url) => {
+    if (String(url).endsWith('/sendMessage')) {
+      sendAttempts += 1;
+      if (sendAttempts === 1) return { ok: false, status: 429, async json() { return { ok: false, description: 'Too Many Requests', parameters: { retry_after: 0 } }; } };
+    }
+    return { ok: true, status: 200, async json() { return { ok: true, result: { message_id: 9 } }; } };
+  };
+
+  try {
+    const { telegramTest } = await import(`../src/telegram.js?rate-limit=${Date.now()}`);
+    await telegramTest.handleMessage({ message_id: 80, from: { id: 42 }, chat: { id: 42, type: 'private' }, text: '/help' });
+    assert.equal(sendAttempts, 2);
+  } finally {
+    globalThis.netpilotServerApi = originalApi;
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test('Telegram registers its command menu when the Bot starts', async () => {
   const originalApi = globalThis.netpilotServerApi;
   const originalFetch = globalThis.fetch;
@@ -508,7 +626,7 @@ test('Telegram registers its command menu when the Bot starts', async () => {
     await module.startTelegramBot();
     const registration = requests.find((request) => request.url.endsWith('/setMyCommands'));
     assert.ok(registration);
-    assert.deepEqual(registration.body.commands.map((command) => command.command), ['help', 'status', 'bind', 'agents', 'iperf', 'nexttrace']);
+    assert.deepEqual(registration.body.commands.map((command) => command.command), ['help', 'status', 'bind', 'agents', 'iperf', 'nexttrace', 'rei', 'ren']);
   } finally {
     if (originalDisable === undefined) delete process.env.NETPILOT_DISABLE_TELEGRAM;
     else process.env.NETPILOT_DISABLE_TELEGRAM = originalDisable;

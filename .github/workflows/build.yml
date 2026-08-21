@@ -41,6 +41,7 @@ jobs:
           go-version: '1.23.x'
           cache-dependency-path: agent/go.sum
       - run: go mod download
+      - run: go test ./...
       - run: mkdir -p ../dist
       - name: Build Linux agent
         env:

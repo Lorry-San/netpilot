@@ -124,6 +124,7 @@ test('security invariants, roles and Agent installation lock', async (t) => {
   assert.ok(database.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'telegram_users'").get());
   assert.ok(database.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'telegram_groups'").get());
   assert.ok(database.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'telegram_bind_codes'").get());
+  assert.ok(database.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'telegram_recent_runs'").get());
   const admin = database.prepare('SELECT * FROM users WHERE id = 1').get();
   assert.equal(admin.id, 1);
   assert.equal(admin.role, 'admin');
@@ -354,7 +355,7 @@ test('security invariants, roles and Agent installation lock', async (t) => {
 
   const version = await request(base, '/api/system/version', {}, session);
   assert.equal(version.response.status, 200);
-  assert.equal(version.body.current, '0.2.1');
+  assert.equal(version.body.current, '0.2.2');
   assert.ok(Object.hasOwn(version.body, 'updateAvailable'));
 
   socket.close();

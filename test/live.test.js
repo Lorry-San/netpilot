@@ -136,6 +136,8 @@ test('install commands follow request host and UI websocket streams task events'
 
   agentSocket.send(JSON.stringify({ type: 'task.stdout', taskId, payload: { line: '[  5] 0.00-1.00 sec 110 MBytes 923 Mbits/sec' } }));
   agentSocket.send(JSON.stringify({ type: 'task.metric', taskId, payload: { second: 1, sendMbps: 923, recvMbps: 923 } }));
+  agentSocket.send(JSON.stringify({ type: 'task.metric', taskId, payload: { second: 1, sendMbps: 500, recvMbps: 500 } }));
+  agentSocket.send(JSON.stringify({ type: 'task.metric', taskId, payload: { second: 5.2, sendMbps: 600, recvMbps: 600 } }));
   const liveLine = await waitForMessage(uiSocket, (message) => message.type === 'task.stdout' && message.taskId === taskId, 3000, 'ui task.stdout');
   assert.match(liveLine.payload.line, /923 Mbits\/sec/);
   const liveMetric = await waitForMessage(uiSocket, (message) => message.type === 'task.metric' && message.taskId === taskId, 3000, 'ui task.metric');
@@ -144,6 +146,9 @@ test('install commands follow request host and UI websocket streams task events'
   agentSocket.send(JSON.stringify({ type: 'task.done', taskId, payload: { exitCode: 0, durationMs: 5000 } }));
   const liveDone = await waitForMessage(uiSocket, (message) => message.type === 'task.done' && message.taskId === taskId, 3000, 'ui task.done');
   assert.equal(liveDone.payload.status, 'completed');
+  const storedTests = await request(base, '/api/tests', {}, session);
+  const storedTask = storedTests.body.tests.find((item) => item.id === taskId);
+  assert.deepEqual(storedTask.metrics.map((metric) => [metric.second, metric.sendMbps]), [[1, 923]]);
 
   agentSocket.send(JSON.stringify({ type: 'task.stdout', taskId, payload: { line: 'post-completion-line' } }));
   await new Promise((resolvePromise) => setTimeout(resolvePromise, 600));

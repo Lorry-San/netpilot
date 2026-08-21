@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>NetPilot</title>
-  <link rel="stylesheet" href="/styles.css?v=0.2.1">
+  <link rel="stylesheet" href="/styles.css?v=0.2.2">
 </head>
 <body>
   <div class="bg-layer" aria-hidden="true"></div>
@@ -142,6 +142,8 @@
               <div><code>/iperf</code><span>选择 Agent 和上/下行，再到 Bot 私聊输入 IP:端口</span></div>
               <div><code>/iperf IP [端口] [线程] [时长] [-R]</code><span>快捷测速默认上行；显式 -R 为下行</span></div>
               <div><code>/nexttrace [参数] 目标</code><span>选择一个 Agent 后立即开始路由追踪</span></div>
+              <div><code>/rei</code><span>按最近一次参数和 Agent 重新执行 iperf</span></div>
+              <div><code>/ren</code><span>按最近一次参数和 Agent 重新执行 NextTrace</span></div>
             </div>
           </section>
         </div>
@@ -289,6 +291,6 @@
   </dialog>
 
   <div id="toast" role="status" aria-live="polite"></div>
-  <script type="module" src="/app.js?v=0.2.1"></script>
+  <script type="module" src="/app.js?v=0.2.2"></script>
 </body>
 </html>

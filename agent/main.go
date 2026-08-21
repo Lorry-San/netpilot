@@ -98,6 +98,7 @@ type netSample struct {
 
 var bitratePattern = regexp.MustCompile(`([0-9]+(?:\.[0-9]+)?)\s+([KMG])bits/sec`)
 var intervalPattern = regexp.MustCompile(`([0-9]+(?:\.[0-9]+)?)-([0-9]+(?:\.[0-9]+)?)\s+sec`)
+var summaryPattern = regexp.MustCompile(`(?i)\b(?:sender|receiver)\s*$`)
 var updateVersionPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`updated to\s+(v?[0-9][0-9A-Za-z._-]*)`),
 	regexp.MustCompile(`up to date\s+\((v?[0-9][0-9A-Za-z._-]*)\)`),
@@ -443,7 +444,13 @@ func nextTraceArgs(task traceParams, target string) []string {
 	return append(args, target)
 }
 
-func parseMetric(line string) (map[string]any, bool) {
+func parseMetric(line string, parallel ...int) (map[string]any, bool) {
+	if summaryPattern.MatchString(line) {
+		return nil, false
+	}
+	if len(parallel) > 0 && parallel[0] > 1 && !strings.HasPrefix(strings.TrimSpace(line), "[SUM]") {
+		return nil, false
+	}
 	bitrate := bitratePattern.FindStringSubmatch(line)
 	interval := intervalPattern.FindStringSubmatch(line)
 	if len(bitrate) != 3 || len(interval) != 3 {
@@ -463,7 +470,7 @@ func parseMetric(line string) (map[string]any, bool) {
 	return map[string]any{"second": second, "sendMbps": value, "recvMbps": value}, true
 }
 
-func streamOutput(c *client, taskID, stream string, reader io.Reader, wg *sync.WaitGroup) {
+func streamOutput(c *client, taskID, stream string, reader io.Reader, parallel int, wg *sync.WaitGroup) {
 	defer wg.Done()
 	scanner := bufio.NewScanner(reader)
 	scanner.Buffer(make([]byte, 64*1024), 1024*1024)
@@ -471,7 +478,7 @@ func streamOutput(c *client, taskID, stream string, reader io.Reader, wg *sync.W
 		line := scanner.Text()
 		_ = c.send(message{Type: "task." + stream, TaskID: taskID, Payload: map[string]any{"line": line}})
 		if stream == "stdout" {
-			if metric, ok := parseMetric(line); ok {
+			if metric, ok := parseMetric(line, parallel); ok {
 				_ = c.send(message{Type: "task.metric", TaskID: taskID, Payload: metric})
 			}
 		}
@@ -523,8 +530,8 @@ func executeTask(parent context.Context, c *client, taskID string, raw map[strin
 	}
 	var wg sync.WaitGroup
 	wg.Add(2)
-	go streamOutput(c, taskID, "stdout", stdout, &wg)
-	go streamOutput(c, taskID, "stderr", stderr, &wg)
+	go streamOutput(c, taskID, "stdout", stdout, task.Parallel, &wg)
+	go streamOutput(c, taskID, "stderr", stderr, task.Parallel, &wg)
 	err = cmd.Wait()
 	wg.Wait()
 	exitCode := 0

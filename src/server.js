@@ -442,8 +442,23 @@ function sendAgent(agentId, message) {
   return true;
 }
 
+function normalizeTaskMetrics(rows, duration, parallel = 1) {
+  const bySecond = new Map();
+  for (const row of rows) {
+    const second = Number(row.second);
+    if (!Number.isFinite(second) || second < 0 || second > Number(duration || 0) + 0.05) continue;
+    const key = second.toFixed(3);
+    const current = bySecond.get(key);
+    const rate = Math.max(Number(row.sendMbps || 0), Number(row.recvMbps || 0));
+    const currentRate = current ? Math.max(Number(current.sendMbps || 0), Number(current.recvMbps || 0)) : -1;
+    if (!current || (parallel > 1 && rate > currentRate)) bySecond.set(key, { ...row, second });
+  }
+  return [...bySecond.values()].sort((a, b) => a.second - b.second);
+}
+
 function taskView(task) {
   const agent = get('SELECT name, deleted_at FROM agents WHERE id = ?', task.agent_id);
+  const metrics = all('SELECT second, send_mbps AS sendMbps, recv_mbps AS recvMbps, cpu_percent AS cpuPercent, memory_percent AS memoryPercent FROM test_metrics WHERE test_id = ? ORDER BY second ASC, id ASC', task.id);
   return {
     id: task.id,
     agentId: task.agent_id,
@@ -461,7 +476,7 @@ function taskView(task) {
     finishedAt: task.finished_at,
     createdAt: task.created_at,
     output: all('SELECT stream, line, created_at AS createdAt FROM test_output WHERE test_id = ? ORDER BY id ASC', task.id),
-    metrics: all('SELECT second, send_mbps AS sendMbps, recv_mbps AS recvMbps, cpu_percent AS cpuPercent, memory_percent AS memoryPercent FROM test_metrics WHERE test_id = ? ORDER BY second ASC', task.id)
+    metrics: normalizeTaskMetrics(metrics, task.duration, task.parallel)
   };
 }
 
@@ -780,7 +795,18 @@ function handleAgentMessage(socket, agentId, message) {
     broadcastTask(task, { type, taskId, payload: { line } });
   } else if (type === 'task.metric') {
     const p = message.payload || {};
-    run('INSERT INTO test_metrics (test_id, second, send_mbps, recv_mbps, cpu_percent, memory_percent, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)', taskId, Number(p.second || 0), p.sendMbps ?? null, p.recvMbps ?? null, p.cpuPercent ?? null, p.memoryPercent ?? null, now());
+    const second = Number(p.second);
+    if (!Number.isFinite(second) || second < 0 || second > Number(task.duration || 0) + 0.05) return;
+    const existing = get('SELECT id, send_mbps, recv_mbps FROM test_metrics WHERE test_id = ? AND ABS(second - ?) < 0.0005 ORDER BY id ASC LIMIT 1', taskId, second);
+    if (existing) {
+      if (Number(task.parallel || 1) <= 1) return;
+      const incomingRate = Math.max(Number(p.sendMbps || 0), Number(p.recvMbps || 0));
+      const existingRate = Math.max(Number(existing.send_mbps || 0), Number(existing.recv_mbps || 0));
+      if (incomingRate <= existingRate) return;
+      run('UPDATE test_metrics SET send_mbps = ?, recv_mbps = ?, cpu_percent = ?, memory_percent = ?, created_at = ? WHERE id = ?', p.sendMbps ?? null, p.recvMbps ?? null, p.cpuPercent ?? null, p.memoryPercent ?? null, now(), existing.id);
+    } else {
+      run('INSERT INTO test_metrics (test_id, second, send_mbps, recv_mbps, cpu_percent, memory_percent, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)', taskId, second, p.sendMbps ?? null, p.recvMbps ?? null, p.cpuPercent ?? null, p.memoryPercent ?? null, now());
+    }
     broadcastTask(task, { type, taskId, payload: p });
   } else if (type === 'task.done') {
     if (task.status === 'cancelled') {
